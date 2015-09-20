@@ -1,4 +1,11 @@
-
+/*
+    SOCKS v4 && v5 && Http Proxy
+    usage:
+        双击 - 直接启动，默认端口10086
+        Socks5 -i 安装为服务
+        Socks5 -u 删除服务
+        Socks5 -p PORT USER PASS
+*/
 #include <winsock2.h>
 #include <Windows.h>
 #include <Winsvc.h>
@@ -23,10 +30,9 @@ void WINAPI ServiceCtrlHandler(DWORD Opcode);
 BOOL InstallService();
 BOOL DeleteService();
 
-char ErrorMsg[]="Http/1.1 403 Forbidden\r\n\r\n<body><h1>403 Forbidden</h1></body>";
 char ConnectionEstablished[]="HTTP/1.0 200 OK\r\n\r\n";
 
-int LisPort = 10086;
+u_short LisPort = 10086;
 char Username[256]="\0";
 char Password[256]="\0";
 
@@ -138,7 +144,7 @@ char * GetURLRootPoint(char * ReceiveBuf,int DataLen,int *HostNaneLen)
 }
 //---------------------------------------------------------------------------
 // 检查从client收到的请求buf，看是否为http请求
-int CheckRequest(char *ReceiveBuf,int *MethodLength)  // done!
+int CheckHttpRequest(char *ReceiveBuf,int *MethodLength)  // done!
 {
 	if(!_strnicmp(ReceiveBuf,"GET ",4))
 	{
@@ -186,7 +192,7 @@ int ModifyRequest(char *SenderBuf,char *ReceiveBuf,int DataLen,int MethodLength)
 BOOL SendRequest(SOCKET* CSsocket, char *SenderBuf, char *ReceiveBuf, int DataLen)
 {
 	int MethodLength=0;
-	int Flag = CheckRequest(ReceiveBuf,&MethodLength);
+	int Flag = CheckHttpRequest(ReceiveBuf,&MethodLength);
 	if(Flag==0)
         return 0;
 	
@@ -230,36 +236,43 @@ BOOL SendRequest(SOCKET* CSsocket, char *SenderBuf, char *ReceiveBuf, int DataLe
 	return 1;
 }
 
-int Authentication(SOCKET* CSsocket, char *ReceiveBuf,int DataLen)
+int Authentication(SOCKET* CSsocket, char *ReceiveBuf, int DataLen)
 {
-	Socks5Req *sq;
-	char Method[2]={0x05,0};
-	sq=(Socks5Req *)ReceiveBuf;
+	Socks5Req *sq = (Socks5Req *)ReceiveBuf;
 	////printf("%d,%d,%d,%d,%d\n",sq->Ver,sq->nMethods,sq->Methods[0],sq->Methods[1],sq->Methods[2]);
+
 	if(sq->Ver!=5)
 		return sq->Ver;
+
+    char Method[2]={0x05,0};
+
 	if((sq->Methods[0]==0)||(sq->Methods[0]==2))//00，无需认证；01，GSSAPI；02，需要用户名和PASSWORD
 	{
 		if(strlen(Username)==0)
 			Method[1]=0x00;
 		else
 			Method[1]=0x02;
+
 		if(send(CSsocket[0],Method,2,0) == SOCKET_ERROR)
 			return 0;
 	}else
 		return 0;
-	if(Method[1]==0x02)//00，无需认证；01，GSSAPI；02，需要用户名和PASSWORD
+
+	if(Method[1]==0x02)
 	{
 		char USER[256];
 		char PASS[256];
 		memset(USER,0,sizeof(USER));
 		memset(PASS,0,sizeof(PASS));
+
 		DataLen = recv(CSsocket[0],ReceiveBuf,MAXBUFSIZE,0);
 		if(DataLen == SOCKET_ERROR || DataLen == 0)
 			return 0;
+
 		AuthReq *aq=(AuthReq *)ReceiveBuf;
 		if(aq->Ver!=1)
 			return 0;
+
 		if((aq->Ulen!=0)&&(aq->Ulen<=256))
 			memcpy(USER,ReceiveBuf+2,aq->Ulen);
 		int PLen=ReceiveBuf[2+aq->Ulen];
@@ -270,13 +283,14 @@ int Authentication(SOCKET* CSsocket, char *ReceiveBuf,int DataLen)
 		if(!strcmp(Username,USER) && !strcmp(Password,PASS))
 		{
 			ReceiveBuf[1]=0x00;
-			//printf("Socks5 Authentication Passed\n");
+			printf("Socks5 Authentication Passed~\n");
 		}
 		else
 		{
 			ReceiveBuf[1]=0xFF;
-			//printf("Invalid Password\n");
+			printf("Invalid Password\n");
 		}
+
 		if(send(CSsocket[0],ReceiveBuf,2,0) == SOCKET_ERROR)
 			return 0;
 	}
@@ -317,16 +331,19 @@ int GetAddressAndPort(char *ReceiveBuf, int DataLen, int ATYP, char *HostName, W
 {
 	DWORD Socks5InfoSize = sizeof(Socks5Info);
 	DWORD dwIndex = 0;
-	Socks4Req *Socks4Request=(Socks4Req *)ReceiveBuf;
+	Socks4Req  *Socks4Request=( Socks4Req *)ReceiveBuf;
 	Socks5Info *Socks5Request=(Socks5Info *)ReceiveBuf;
 	struct sockaddr_in in;
+
 	if(ATYP==2) //Socks v4 !!!
 	{
 		*RemotePort=ntohs(Socks4Request->wPort);
+
 		if(ReceiveBuf[4]!=0x00) //USERID !!
 			in.sin_addr.s_addr = Socks4Request->dwIP;
 		else
 			in.sin_addr.s_addr = inet_addr(DNS((char*)&Socks4Request->other+1));
+
 		memcpy(HostName, inet_ntoa(in.sin_addr),strlen(inet_ntoa(in.sin_addr)));
 		return 1;
 	}
@@ -402,16 +419,17 @@ int TalkWithClient(SOCKET *CSsocket, char *ReceiveBuf, int DataLen, char *HostNa
 	//CSsocket[0] ClientSocket
 	//CSsocket[1] ServerSocket
 	
-	int Flag=0;
-	//Username Password Authentication
-	Flag = Authentication(CSsocket, ReceiveBuf, DataLen);
-	if(Flag==0) return 0;
+	int Flag = Authentication(CSsocket, ReceiveBuf, DataLen);
+	if(Flag==0)
+        return 0;
+
 	if(Flag==4) //Processing Socks v4 requests......
 	{//The third parameter ATYP==2 is not used for Socks5 protocol,I use it to flag the socks4 request.
 		if(!GetAddressAndPort(ReceiveBuf, DataLen, 2, HostName, RemotePort))
 			return 0;
 		return 4;
 	}
+
 	//Processing Socks v5 requests......
 	DataLen = recv(CSsocket[0],ReceiveBuf,MAXBUFSIZE,0);
 	
@@ -429,11 +447,11 @@ int TalkWithClient(SOCKET *CSsocket, char *ReceiveBuf, int DataLen, char *HostNa
 	{
 		if(!GetAddressAndPort(ReceiveBuf, DataLen, Socks5Request->ATYP, HostName, RemotePort))
 			return 0;
-	}else return 0;
 	
-	//Get and return the work mode. 1:TCP CONNECT   3:UDP ASSOCIATE
-	if((Socks5Request->CMD == 1)||(Socks5Request->CMD == 3))
-		return Socks5Request->CMD;
+        //Get and return the work mode. 1:TCP CONNECT   3:UDP ASSOCIATE
+        if((Socks5Request->CMD == 1)||(Socks5Request->CMD == 3))
+            return Socks5Request->CMD;
+    }
 	
 	return 0;
 }
@@ -471,11 +489,30 @@ BOOL CreateUDPSocket(Socks5AnsConn *SAC, SOCKET *socks)
 
 DWORD WINAPI ProxyThread(SOCKET* CSsocket)
 {
+    // 申请ReceiveBuf，接收client发来的第一条消息
 	char *ReceiveBuf = (char*)malloc(sizeof(char)*MAXBUFSIZE);
     memset(ReceiveBuf,0,MAXBUFSIZE);
     int DataLen = recv(CSsocket[0],ReceiveBuf,MAXBUFSIZE,0);
     if(DataLen == 0)
-        goto exit;
+    {
+        free(ReceiveBuf);
+        return 0;
+    }
+
+    // 判断代理类型，1代表是http代理，4是Socks4，5是Socks5，其他不支持直接return。
+    int ProxyType = ReceiveBuf[0];
+    if (ProxyType != 5 && ProxyType != 4)
+    {
+        int MethodLength;
+        ProxyType = CheckHttpRequest(ReceiveBuf, &MethodLength);
+        if (!ProxyType)
+            ProxyType = 1;  // 1代表是http代理
+        else
+        {
+            free(ReceiveBuf);
+            return 0;
+        }
+    }
 
     char *SenderBuf = (char*)malloc(sizeof(char)*MAXBUFSIZE);
     memset(SenderBuf,0,MAXBUFSIZE);
@@ -483,9 +520,6 @@ DWORD WINAPI ProxyThread(SOCKET* CSsocket)
         goto exit;
 
     /////////////////////////////////////////////
-    DWORD dwThreadID;
-    WORD  RemotePort = 0;
-
 	Socks4Req Socks4Request;
 	Socks5AnsConn SAC;
 	memset(&SAC,0,sizeof(SAC));
@@ -496,25 +530,28 @@ DWORD WINAPI ProxyThread(SOCKET* CSsocket)
 	memset(&sPara,0,sizeof(Socks5Para));
 	memset(&in,0,sizeof(sockaddr_in));
 	int structsize=sizeof(sockaddr_in);
-	////////////////////////
+	/////////////////////////////////////////////
     
-    int ProtocolVer=0;
+    int ProtocolVer = 0;
+    WORD RemotePort = 0;
     char *HostName = (char*)malloc(sizeof(char)*MAX_HOSTNAME);
     memset(HostName,0,MAX_HOSTNAME);
 	int Flag=TalkWithClient(CSsocket, ReceiveBuf, DataLen, HostName, &RemotePort);
 	if(!Flag)
 	{
-	/*SAC.Ver=0x05;
+	/*
+    SAC.Ver=0x05;
 	SAC.REP=0x01;
 	SAC.ATYP=0x01;
-		send(CSsocket[0], (char *)&SAC, 10, 0);*/
+	send(CSsocket[0], (char *)&SAC, 10, 0);
+    */
 		goto exit;
 	}
 	else if(Flag==1) //TCP CONNECT
 	{
 		ProtocolVer=5;
 		if(!ConnectToRemoteHost(&CSsocket[1],HostName,RemotePort))
-			SAC.REP=0x01;
+		SAC.REP=0x01;
 		SAC.Ver=0x05;
 		SAC.ATYP=0x01;
 		if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
@@ -547,27 +584,29 @@ DWORD WINAPI ProxyThread(SOCKET* CSsocket)
 		
 		sPara.Local.IPandPort=SAC.IPandPort; //Copy local UDPsocket data structure to sPara.Local
 		////// Create UDP Transfer thread
-		HANDLE ThreadHandle = CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)UDPTransfer,(LPVOID)&sPara,0,&dwThreadID);
-		if (ThreadHandle != NULL)
+		HANDLE ThreadHandle = CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)UDPTransfer,(LPVOID)&sPara,0,NULL);
+		if (ThreadHandle)
 		{
 			//printf("Socks%d UDP Session-> %s:%d\n",ProtocolVer,inet_ntoa(in.sin_addr),ntohs(sPara.Client.IPandPort.wPort));
 			WaitForSingleObject(ThreadHandle, INFINITE);
-			//printf("UDPTransfer Thread %d Exit.\n",n);
+			//printf("UDPTransfer Thread Exit.\n");
 		}else
 			goto exit;
 		return 1;
 		////////////////////
 	}
-	else if(Flag==4) // Socks v4! I use the return value==4 to flag the Socks v4 request.
+	else if(Flag==4) // Socks v4!
 	{
 		ProtocolVer=4;
 		memset(&Socks4Request, 0, 9);
 		if(!ConnectToRemoteHost(&CSsocket[1],HostName,RemotePort))
-			Socks4Request.REP = 0x5B; //REJECT
+			Socks4Request.REP = 0x5B; //REJECT 拒绝
 		else
-			Socks4Request.REP = 0x5A; //GRANT
+			Socks4Request.REP = 0x5A; //GRANT 准许
+
 		if(send(CSsocket[0], (char *)&Socks4Request, 8, 0) == SOCKET_ERROR)
 			goto exit;
+
 		if(Socks4Request.REP==0x5B)   //ConnectToRemoteHost failed,closesocket and free some point.
 			goto exit;
 	}else
@@ -576,11 +615,9 @@ DWORD WINAPI ProxyThread(SOCKET* CSsocket)
 	if(CSsocket[0] && CSsocket[1])
 	{
 		//printf("Socks%d TCP Session-> %s:%d\n",ProtocolVer,HostName,RemotePort);
-		HANDLE ThreadHandle = CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)TCPTransfer,(LPVOID)CSsocket,0,&dwThreadID);
-		if (ThreadHandle != NULL)
-		{
+		HANDLE ThreadHandle = CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)TCPTransfer,(LPVOID)CSsocket,0,NULL);
+		if (ThreadHandle)
 			WaitForSingleObject(ThreadHandle, INFINITE);
-		}
 	}
 
 exit:
@@ -589,6 +626,7 @@ exit:
 	free(CSsocket);
 	free(HostName);
 	free(SenderBuf);
+    //
 	free(ReceiveBuf);
 	return 0;
 }
@@ -1043,7 +1081,7 @@ int main(int argc, char* argv[])
 
     if (!g_ServiceStatusHandle)
     {
-        printf("SOCKS v4 && v5 && Http Proxy V1.0 By logan liu@SBM.\n");
+        printf("SOCKS v4 && v5 && Http Proxy V1.0\n");
 
         if(argc>2)
         {
