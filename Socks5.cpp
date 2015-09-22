@@ -239,10 +239,6 @@ BOOL SendRequest(SOCKET* CSsocket, char *SenderBuf, char *ReceiveBuf, int DataLe
 int Authentication(SOCKET* CSsocket, char *ReceiveBuf, int DataLen)
 {
 	Socks5Req *sq = (Socks5Req *)ReceiveBuf;
-	////printf("%d,%d,%d,%d,%d\n",sq->Ver,sq->nMethods,sq->Methods[0],sq->Methods[1],sq->Methods[2]);
-
-	if(sq->Ver!=5)
-		return sq->Ver;
 
     char Method[2]={0x05,0};
 
@@ -278,8 +274,7 @@ int Authentication(SOCKET* CSsocket, char *ReceiveBuf, int DataLen)
 		int PLen=ReceiveBuf[2+aq->Ulen];
 		if((PLen!=0)&&(PLen<=256))
 			memcpy(PASS,ReceiveBuf+3+aq->Ulen,PLen);
-		//printf("USER %s\nPASS %s\n",USER,PASS);
-		//0=login successfully,0xFF=failure;
+
 		if(!strcmp(Username,USER) && !strcmp(Password,PASS))
 		{
 			ReceiveBuf[1]=0x00;
@@ -414,34 +409,88 @@ BOOL ConnectToRemoteHost(SOCKET *ServerSocket,char *HostName,const WORD RemotePo
 	return TRUE;
 }
 
+int DoSocks5()
+{
+    Socks5AnsConn SAC;
+	memset(&SAC,0,sizeof(SAC));
+
+	int Flag=TalkWithClient(CSsocket, ReceiveBuf, DataLen, HostName, &RemotePort);
+	if(!Flag)
+	{
+	/*
+    SAC.Ver=0x05;
+	SAC.REP=0x01;
+	SAC.ATYP=0x01;
+	send(CSsocket[0], (char *)&SAC, 10, 0);
+    */
+		goto exit;
+	}
+	else if(Flag==1) //TCP CONNECT
+	{
+		if(!ConnectToRemoteHost(&CSsocket[1],HostName,RemotePort))
+		SAC.REP=0x01;
+		SAC.Ver=0x05;
+		SAC.ATYP=0x01;
+		if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
+			goto exit;
+		if(SAC.REP==0x01) // general SOCKS server failure
+			goto exit;
+	}
+	else if(Flag==3) //UDP ASSOCIATE
+	{
+        Socks5Para sPara;
+        struct sockaddr_in in;
+        memset(&sPara,0,sizeof(Socks5Para));
+        memset(&in,0,sizeof(sockaddr_in));
+        int structsize=sizeof(sockaddr_in);
+
+		//Save the client connection information(client IP and source port)
+		getpeername(CSsocket[0],(struct sockaddr *)&in,&structsize);
+		if(inet_addr(HostName)==0)
+			sPara.Client.IPandPort.dwIP = in.sin_addr.s_addr;
+		else
+			sPara.Client.IPandPort.dwIP = inet_addr(DNS(HostName));
+		
+		////printf("Accept ip:%s\n",inet_ntoa(in.sin_addr));
+		sPara.Client.IPandPort.wPort= htons(RemotePort);/////////////////
+		sPara.Client.socks=CSsocket[0];
+		
+		if(!CreateUDPSocket(&SAC,&sPara.Local.socks)) //Create a local UDP socket
+			SAC.REP=0x01;
+		SAC.Ver=5;
+		SAC.ATYP=1;
+		if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
+			goto exit;
+		if(SAC.REP==0x01) // general SOCKS server failure
+			goto exit;
+		
+		sPara.Local.IPandPort=SAC.IPandPort; //Copy local UDPsocket data structure to sPara.Local
+		////// Create UDP Transfer thread
+		HANDLE ThreadHandle = CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)UDPTransfer,(LPVOID)&sPara,0,NULL);
+		if (ThreadHandle)
+		{
+			//printf("Socks UDP Session-> %s:%d\n",inet_ntoa(in.sin_addr),ntohs(sPara.Client.IPandPort.wPort));
+			WaitForSingleObject(ThreadHandle, INFINITE);
+			//printf("UDPTransfer Thread Exit.\n");
+		}else
+			goto exit;
+		return 1;
+	}
+	else
+		goto exit;
+}
+
 int TalkWithClient(SOCKET *CSsocket, char *ReceiveBuf, int DataLen, char *HostName, WORD *RemotePort)
 {
 	//CSsocket[0] ClientSocket
 	//CSsocket[1] ServerSocket
-	
-	int Flag = Authentication(CSsocket, ReceiveBuf, DataLen);
-	if(Flag==0)
-        return 0;
 
-	if(Flag==4) //Processing Socks v4 requests......
-	{//The third parameter ATYP==2 is not used for Socks5 protocol,I use it to flag the socks4 request.
-		if(!GetAddressAndPort(ReceiveBuf, DataLen, 2, HostName, RemotePort))
-			return 0;
-		return 4;
-	}
-
-	//Processing Socks v5 requests......
 	DataLen = recv(CSsocket[0],ReceiveBuf,MAXBUFSIZE,0);
 	
 	if(DataLen == SOCKET_ERROR || DataLen == 0)
 		return 0;
 	Socks5Info *Socks5Request=(Socks5Info *)ReceiveBuf;
 	
-	if (Socks5Request->Ver != 5) //Invalid Socks 5 Request
-	{
-		//printf("Invalid Socks 5 Request\n");
-		return 0;
-	}
 	//Get IP Type //0x01==IP V4地址 0x03代表域名;0x04代表IP V6地址;not Support
 	if((Socks5Request->ATYP==1)||(Socks5Request->ATYP==3))
 	{
@@ -500,13 +549,51 @@ DWORD WINAPI ProxyThread(SOCKET* CSsocket)
     }
 
     // 判断代理类型，1代表是http代理，4是Socks4，5是Socks5，其他不支持直接return。
+    char *SenderBuf = NULL;
+    WORD RemotePort = 0;
+    char *HostName = (char*)malloc(sizeof(char)*MAX_HOSTNAME);
+    memset(HostName,0,MAX_HOSTNAME);
+
     int ProxyType = ReceiveBuf[0];
-    if (ProxyType != 5 && ProxyType != 4)
+    if (ProxyType == 5)
+    {
+        if ( !Authentication(CSsocket, ReceiveBuf, DataLen) )
+            return 0;
+
+        if ( !DoSocks5() )
+            return 0;
+    }
+    else if (ProxyType == 4)
+    {
+        if(!GetAddressAndPort(ReceiveBuf, DataLen, 2, HostName, &RemotePort))
+            return 0;
+
+        Socks4Req Socks4Request;
+        memset(&Socks4Request, 0, 9);
+        if(!ConnectToRemoteHost(&CSsocket[1],HostName,RemotePort))
+            Socks4Request.REP = 0x5B; //REJECT 拒绝
+        else
+            Socks4Request.REP = 0x5A; //GRANT 准许
+
+        if(send(CSsocket[0], (char *)&Socks4Request, 8, 0) == SOCKET_ERROR)
+            goto exit;
+
+        if(Socks4Request.REP==0x5B)   //ConnectToRemoteHost failed,closesocket and free some point.
+            goto exit;
+    }
+    else
     {
         int MethodLength;
         ProxyType = CheckHttpRequest(ReceiveBuf, &MethodLength);
-        if (!ProxyType)
+        if (ProxyType)
+        {
             ProxyType = 1;  // 1代表是http代理
+
+            SenderBuf = (char*)malloc(sizeof(char)*MAXBUFSIZE);
+            memset(SenderBuf,0,MAXBUFSIZE);
+            if(SendRequest(CSsocket, SenderBuf, ReceiveBuf, DataLen)) //http proxy
+                goto exit;
+        }
         else
         {
             free(ReceiveBuf);
@@ -514,107 +601,11 @@ DWORD WINAPI ProxyThread(SOCKET* CSsocket)
         }
     }
 
-    char *SenderBuf = (char*)malloc(sizeof(char)*MAXBUFSIZE);
-    memset(SenderBuf,0,MAXBUFSIZE);
-    if(SendRequest(CSsocket, SenderBuf, ReceiveBuf, DataLen)) //http proxy
-        goto exit;
-
     /////////////////////////////////////////////
-	Socks4Req Socks4Request;
-	Socks5AnsConn SAC;
-	memset(&SAC,0,sizeof(SAC));
-
-	/////////////////////////UDP variable
-	Socks5Para sPara;
-	struct sockaddr_in in;
-	memset(&sPara,0,sizeof(Socks5Para));
-	memset(&in,0,sizeof(sockaddr_in));
-	int structsize=sizeof(sockaddr_in);
-	/////////////////////////////////////////////
-    
-    int ProtocolVer = 0;
-    WORD RemotePort = 0;
-    char *HostName = (char*)malloc(sizeof(char)*MAX_HOSTNAME);
-    memset(HostName,0,MAX_HOSTNAME);
-	int Flag=TalkWithClient(CSsocket, ReceiveBuf, DataLen, HostName, &RemotePort);
-	if(!Flag)
-	{
-	/*
-    SAC.Ver=0x05;
-	SAC.REP=0x01;
-	SAC.ATYP=0x01;
-	send(CSsocket[0], (char *)&SAC, 10, 0);
-    */
-		goto exit;
-	}
-	else if(Flag==1) //TCP CONNECT
-	{
-		ProtocolVer=5;
-		if(!ConnectToRemoteHost(&CSsocket[1],HostName,RemotePort))
-		SAC.REP=0x01;
-		SAC.Ver=0x05;
-		SAC.ATYP=0x01;
-		if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
-			goto exit;
-		if(SAC.REP==0x01) // general SOCKS server failure
-			goto exit;
-	}
-	else if(Flag==3) //UDP ASSOCIATE
-	{ //ProcessingUDPsession;
-		ProtocolVer=5;
-		//Save the client connection information(client IP and source port)
-		getpeername(CSsocket[0],(struct sockaddr *)&in,&structsize);
-		if(inet_addr(HostName)==0)
-			sPara.Client.IPandPort.dwIP = in.sin_addr.s_addr;
-		else
-			sPara.Client.IPandPort.dwIP = inet_addr(DNS(HostName));
-		
-		////printf("Accept ip:%s\n",inet_ntoa(in.sin_addr));
-		sPara.Client.IPandPort.wPort= htons(RemotePort);/////////////////
-		sPara.Client.socks=CSsocket[0];
-		
-		if(!CreateUDPSocket(&SAC,&sPara.Local.socks)) //Create a local UDP socket
-			SAC.REP=0x01;
-		SAC.Ver=5;
-		SAC.ATYP=1;
-		if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
-			goto exit;
-		if(SAC.REP==0x01) // general SOCKS server failure
-			goto exit;
-		
-		sPara.Local.IPandPort=SAC.IPandPort; //Copy local UDPsocket data structure to sPara.Local
-		////// Create UDP Transfer thread
-		HANDLE ThreadHandle = CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)UDPTransfer,(LPVOID)&sPara,0,NULL);
-		if (ThreadHandle)
-		{
-			//printf("Socks%d UDP Session-> %s:%d\n",ProtocolVer,inet_ntoa(in.sin_addr),ntohs(sPara.Client.IPandPort.wPort));
-			WaitForSingleObject(ThreadHandle, INFINITE);
-			//printf("UDPTransfer Thread Exit.\n");
-		}else
-			goto exit;
-		return 1;
-		////////////////////
-	}
-	else if(Flag==4) // Socks v4!
-	{
-		ProtocolVer=4;
-		memset(&Socks4Request, 0, 9);
-		if(!ConnectToRemoteHost(&CSsocket[1],HostName,RemotePort))
-			Socks4Request.REP = 0x5B; //REJECT 拒绝
-		else
-			Socks4Request.REP = 0x5A; //GRANT 准许
-
-		if(send(CSsocket[0], (char *)&Socks4Request, 8, 0) == SOCKET_ERROR)
-			goto exit;
-
-		if(Socks4Request.REP==0x5B)   //ConnectToRemoteHost failed,closesocket and free some point.
-			goto exit;
-	}else
-		goto exit;
 	
 	if(CSsocket[0] && CSsocket[1])
 	{
-		//printf("Socks%d TCP Session-> %s:%d\n",ProtocolVer,HostName,RemotePort);
+		//printf("Socks TCP Session-> %s:%d\n",HostName,RemotePort);
 		HANDLE ThreadHandle = CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)TCPTransfer,(LPVOID)CSsocket,0,NULL);
 		if (ThreadHandle)
 			WaitForSingleObject(ThreadHandle, INFINITE);
@@ -625,7 +616,8 @@ exit:
 	closesocket(CSsocket[1]);
 	free(CSsocket);
 	free(HostName);
-	free(SenderBuf);
+    if (SenderBuf)
+	    free(SenderBuf);
     //
 	free(ReceiveBuf);
 	return 0;
