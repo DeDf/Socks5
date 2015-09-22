@@ -271,6 +271,7 @@ int Authentication(SOCKET* CSsocket, char *ReceiveBuf, int DataLen)
 
 		if((aq->Ulen!=0)&&(aq->Ulen<=256))
 			memcpy(USER,ReceiveBuf+2,aq->Ulen);
+
 		int PLen=ReceiveBuf[2+aq->Ulen];
 		if((PLen!=0)&&(PLen<=256))
 			memcpy(PASS,ReceiveBuf+3+aq->Ulen,PLen);
@@ -356,20 +357,23 @@ int GetAddressAndPort(char *ReceiveBuf, int DataLen, int ATYP, char *HostName, W
 		memcpy(HostName, &Socks5Request->szIP, Socks5Request->IP_LEN);
 		memcpy(RemotePort, &Socks5Request->szIP+Socks5Request->IP_LEN, 2);
 		*RemotePort=ntohs(*RemotePort);
-	}else if((Socks5Request->Ver==0)&&(Socks5Request->CMD==0)&&(ATYP==1))
+	}
+    else if((Socks5Request->Ver==0)&&(Socks5Request->CMD==0)&&(ATYP==1))
 	{
 		IPandPort *IPP=(IPandPort *)&Socks5Request->IP_LEN;
 		in.sin_addr.S_un.S_addr = IPP->dwIP;
 		memcpy(HostName, inet_ntoa(in.sin_addr),strlen(inet_ntoa(in.sin_addr)));
 		*RemotePort = ntohs(IPP->wPort);
 		return 10; //return Data Enter point
-	}else if((Socks5Request->Ver==0)&&(Socks5Request->CMD==0)&&(ATYP==3))
+	}
+    else if((Socks5Request->Ver==0)&&(Socks5Request->CMD==0)&&(ATYP==3))
 	{
 		memcpy(HostName, &Socks5Request->szIP, Socks5Request->IP_LEN);
 		memcpy(RemotePort, &Socks5Request->szIP+Socks5Request->IP_LEN, 2);
 		*RemotePort=ntohs(*RemotePort);
 		return 7+Socks5Request->IP_LEN; //return Data Enter point
-	}else
+	}
+    else
 		return 0;
 	
 	return 1;
@@ -409,12 +413,13 @@ BOOL ConnectToRemoteHost(SOCKET *ServerSocket,char *HostName,const WORD RemotePo
 	return TRUE;
 }
 
-int DoSocks5()
+BOOL DoSocks5()
 {
     Socks5AnsConn SAC;
 	memset(&SAC,0,sizeof(SAC));
 
-	int Flag=TalkWithClient(CSsocket, ReceiveBuf, DataLen, HostName, &RemotePort);
+    IPandPort IPP;
+	int Flag=Get_IP_Port(CSsocket, ReceiveBuf, DataLen, &IPP);
 	if(!Flag)
 	{
 	/*
@@ -427,12 +432,37 @@ int DoSocks5()
 	}
 	else if(Flag==1) //TCP CONNECT
 	{
+        {
+            // Create Socket
+            *ServerSocket = socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+            if (*ServerSocket == INVALID_SOCKET)
+                return FALSE;
+
+            struct sockaddr_in Server;
+            memset(&Server, 0, sizeof(Server));
+
+            Server.sin_family = AF_INET;
+            Server.sin_addr.s_addr = IPP.dwIP;
+            Server.sin_port = IPP.wPort;
+
+            UINT TimeOut = TIMEOUT;
+            setsockopt(CSsocket[1],SOL_SOCKET,SO_RCVTIMEO,(char *)&TimeOut,sizeof(TimeOut));
+            if (connect(CSsocket[1], (const SOCKADDR *)&Server,sizeof(Server)) == SOCKET_ERROR)
+            {
+                printf("Fail To Connect To Remote Host\n");
+                closesocket(CSsocket[1]);
+                return FALSE;
+            }
+        }
+
 		if(!ConnectToRemoteHost(&CSsocket[1],HostName,RemotePort))
-		SAC.REP=0x01;
+		    SAC.REP=0x01;
 		SAC.Ver=0x05;
 		SAC.ATYP=0x01;
+
 		if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
 			goto exit;
+
 		if(SAC.REP==0x01) // general SOCKS server failure
 			goto exit;
 	}
@@ -476,11 +506,12 @@ int DoSocks5()
 			goto exit;
 		return 1;
 	}
-	else
-		goto exit;
+
+exit:
+    return 0;
 }
 
-int TalkWithClient(SOCKET *CSsocket, char *ReceiveBuf, int DataLen, char *HostName, WORD *RemotePort)
+int Get_IP_Port(SOCKET *CSsocket, char *ReceiveBuf, int DataLen, char *HostName, WORD *RemotePort, IPandPort *IPP)
 {
 	//CSsocket[0] ClientSocket
 	//CSsocket[1] ServerSocket
@@ -492,15 +523,21 @@ int TalkWithClient(SOCKET *CSsocket, char *ReceiveBuf, int DataLen, char *HostNa
 	Socks5Info *Socks5Request=(Socks5Info *)ReceiveBuf;
 	
 	//Get IP Type //0x01==IP V4地址 0x03代表域名;0x04代表IP V6地址;not Support
-	if((Socks5Request->ATYP==1)||(Socks5Request->ATYP==3))
+	if(Socks5Request->ATYP==1)
+    {
+        *IPP = *(IPandPort *)&Socks5Request->IP_LEN;
+    }
+    else if (Socks5Request->ATYP==3)
 	{
 		if(!GetAddressAndPort(ReceiveBuf, DataLen, Socks5Request->ATYP, HostName, RemotePort))
 			return 0;
-	
-        //Get and return the work mode. 1:TCP CONNECT   3:UDP ASSOCIATE
-        if((Socks5Request->CMD == 1)||(Socks5Request->CMD == 3))
-            return Socks5Request->CMD;
     }
+    else
+        return 0;
+	
+    //Get and return the work mode. 1:TCP CONNECT   3:UDP ASSOCIATE
+    if((Socks5Request->CMD == 1)||(Socks5Request->CMD == 3))
+        return Socks5Request->CMD;
 	
 	return 0;
 }
