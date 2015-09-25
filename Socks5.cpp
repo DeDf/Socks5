@@ -344,41 +344,30 @@ int GetAddressAndPort(char *ReceiveBuf, int DataLen, int ATYP, char *HostName, W
 		return 1;
 	}
 	
-	//ATYP=0x01代表IP V4地址 0x03代表域名;
-	if((Socks5Request->Ver==5)&&(ATYP==1))
-	{
-		IPandPort *IPP=(IPandPort *)&Socks5Request->IP_LEN;
-		in.sin_addr.S_un.S_addr = IPP->dwIP;
-		memcpy(HostName, inet_ntoa(in.sin_addr),strlen(inet_ntoa(in.sin_addr)));
-		*RemotePort = ntohs(IPP->wPort);
-	}
-	else if((Socks5Request->Ver==5)&&(ATYP==3))
-	{
-		memcpy(HostName, &Socks5Request->szIP, Socks5Request->IP_LEN);
-		memcpy(RemotePort, &Socks5Request->szIP+Socks5Request->IP_LEN, 2);
-		*RemotePort=ntohs(*RemotePort);
-	}
-    else if((Socks5Request->Ver==0)&&(Socks5Request->CMD==0)&&(ATYP==1))
-	{
-		IPandPort *IPP=(IPandPort *)&Socks5Request->IP_LEN;
-		in.sin_addr.S_un.S_addr = IPP->dwIP;
-		memcpy(HostName, inet_ntoa(in.sin_addr),strlen(inet_ntoa(in.sin_addr)));
-		*RemotePort = ntohs(IPP->wPort);
-		return 10; //return Data Enter point
-	}
-    else if((Socks5Request->Ver==0)&&(Socks5Request->CMD==0)&&(ATYP==3))
-	{
-		memcpy(HostName, &Socks5Request->szIP, Socks5Request->IP_LEN);
-		memcpy(RemotePort, &Socks5Request->szIP+Socks5Request->IP_LEN, 2);
-		*RemotePort=ntohs(*RemotePort);
-		return 7+Socks5Request->IP_LEN; //return Data Enter point
-	}
+	if( (Socks5Request->Ver==0)&&(Socks5Request->CMD==0) )
+    {
+        if (ATYP==1)
+        {
+            IPandPort *IPP=(IPandPort *)&Socks5Request->IP_LEN;
+            in.sin_addr.S_un.S_addr = IPP->dwIP;
+            memcpy(HostName, inet_ntoa(in.sin_addr),strlen(inet_ntoa(in.sin_addr)));
+            *RemotePort = ntohs(IPP->wPort);
+            return 10;                       //return Data Enter point
+        }
+        else if (ATYP==3)
+        {
+            memcpy(HostName, &Socks5Request->szIP, Socks5Request->IP_LEN);
+            memcpy(RemotePort, &Socks5Request->szIP+Socks5Request->IP_LEN, 2);
+            *RemotePort=ntohs(*RemotePort);
+            return 7+Socks5Request->IP_LEN;  //return Data Enter point
+        }
+    }
     else
 		return 0;
 	
 	return 1;
-	
 }
+
 BOOL ConnectToRemoteHost(SOCKET *ServerSocket,char *HostName,const WORD RemotePort)
 {
 	struct sockaddr_in Server;
@@ -413,13 +402,55 @@ BOOL ConnectToRemoteHost(SOCKET *ServerSocket,char *HostName,const WORD RemotePo
 	return TRUE;
 }
 
-BOOL DoSocks5()
+int Get_IP_Port(SOCKET s, char *ReceiveBuf, IPandPort *IPP)
+{
+    int DataLen = recv(s,ReceiveBuf,MAXBUFSIZE,0);
+    if(DataLen == SOCKET_ERROR || DataLen == 0)
+        return 0;
+
+    Socks5Info *Socks5Request=(Socks5Info *)ReceiveBuf;
+
+    //Get IP Type //0x01==IP V4地址 0x03代表域名;0x04代表IP V6地址;not Support
+    if(Socks5Request->ATYP==1)
+    {
+        *IPP = *(IPandPort *)&Socks5Request->IP_LEN;
+    }
+    else if (Socks5Request->ATYP==3)
+    {
+        IPP->wPort = *(WORD*)((char*)&Socks5Request->szIP + Socks5Request->IP_LEN);
+
+        if (Socks5Request->IP_LEN >= MAX_HOSTNAME)
+            return 0;
+
+        char HostName[MAX_HOSTNAME];
+        memcpy(HostName, (char*)&Socks5Request->szIP, Socks5Request->IP_LEN);
+        HostName[Socks5Request->IP_LEN] = 0;
+        HOSTENT *hostent = gethostbyname(HostName);
+        if (hostent == NULL)
+            return 0;
+
+        IPP->dwIP = **(PULONG*)hostent->h_addr_list;
+    }
+    else
+        return 0;
+
+    //Get and return the work mode. 1:TCP CONNECT   3:UDP ASSOCIATE
+    if((Socks5Request->CMD == 1)||(Socks5Request->CMD == 3))
+        return Socks5Request->CMD;
+
+    return 0;
+}
+
+BOOL DoSocks5(SOCKET *CSsocket, char *ReceiveBuf)
 {
     Socks5AnsConn SAC;
 	memset(&SAC,0,sizeof(SAC));
+    SAC.Ver=0x05;
+    SAC.ATYP=0x01;
+    SAC.REP=0x01;  // 拒绝
 
     IPandPort IPP;
-	int Flag=Get_IP_Port(CSsocket, ReceiveBuf, DataLen, &IPP);
+	int Flag = Get_IP_Port(CSsocket[0], ReceiveBuf, &IPP);
 	if(!Flag)
 	{
 	/*
@@ -434,9 +465,9 @@ BOOL DoSocks5()
 	{
         {
             // Create Socket
-            *ServerSocket = socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
-            if (*ServerSocket == INVALID_SOCKET)
-                return FALSE;
+            CSsocket[1] = socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+            if (CSsocket[1] == INVALID_SOCKET)
+                goto SendToClient;
 
             struct sockaddr_in Server;
             memset(&Server, 0, sizeof(Server));
@@ -451,95 +482,63 @@ BOOL DoSocks5()
             {
                 printf("Fail To Connect To Remote Host\n");
                 closesocket(CSsocket[1]);
-                return FALSE;
             }
+            else
+                SAC.REP=0x00;
         }
 
-		if(!ConnectToRemoteHost(&CSsocket[1],HostName,RemotePort))
-		    SAC.REP=0x01;
-		SAC.Ver=0x05;
-		SAC.ATYP=0x01;
-
-		if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
+SendToClient:
+        if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
 			goto exit;
 
 		if(SAC.REP==0x01) // general SOCKS server failure
 			goto exit;
-	}
-	else if(Flag==3) //UDP ASSOCIATE
-	{
-        Socks5Para sPara;
-        struct sockaddr_in in;
-        memset(&sPara,0,sizeof(Socks5Para));
-        memset(&in,0,sizeof(sockaddr_in));
-        int structsize=sizeof(sockaddr_in);
 
-		//Save the client connection information(client IP and source port)
-		getpeername(CSsocket[0],(struct sockaddr *)&in,&structsize);
-		if(inet_addr(HostName)==0)
-			sPara.Client.IPandPort.dwIP = in.sin_addr.s_addr;
-		else
-			sPara.Client.IPandPort.dwIP = inet_addr(DNS(HostName));
-		
-		////printf("Accept ip:%s\n",inet_ntoa(in.sin_addr));
-		sPara.Client.IPandPort.wPort= htons(RemotePort);/////////////////
-		sPara.Client.socks=CSsocket[0];
-		
-		if(!CreateUDPSocket(&SAC,&sPara.Local.socks)) //Create a local UDP socket
-			SAC.REP=0x01;
-		SAC.Ver=5;
-		SAC.ATYP=1;
-		if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
-			goto exit;
-		if(SAC.REP==0x01) // general SOCKS server failure
-			goto exit;
-		
-		sPara.Local.IPandPort=SAC.IPandPort; //Copy local UDPsocket data structure to sPara.Local
-		////// Create UDP Transfer thread
-		HANDLE ThreadHandle = CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)UDPTransfer,(LPVOID)&sPara,0,NULL);
-		if (ThreadHandle)
-		{
-			//printf("Socks UDP Session-> %s:%d\n",inet_ntoa(in.sin_addr),ntohs(sPara.Client.IPandPort.wPort));
-			WaitForSingleObject(ThreadHandle, INFINITE);
-			//printf("UDPTransfer Thread Exit.\n");
-		}else
-			goto exit;
-		return 1;
+        return 1;
 	}
+// 	else if(Flag==3) //UDP ASSOCIATE
+// 	{
+//         Socks5Para sPara;
+//         struct sockaddr_in in;
+//         memset(&sPara,0,sizeof(Socks5Para));
+//         memset(&in,0,sizeof(sockaddr_in));
+//         int structsize=sizeof(sockaddr_in);
+// 
+// 		//Save the client connection information(client IP and source port)
+// 		getpeername(CSsocket[0],(struct sockaddr *)&in,&structsize);
+// 		if(inet_addr(HostName)==0)
+// 			sPara.Client.IPandPort.dwIP = in.sin_addr.s_addr;
+// 		else
+// 			sPara.Client.IPandPort.dwIP = inet_addr(DNS(HostName));
+// 		
+// 		////printf("Accept ip:%s\n",inet_ntoa(in.sin_addr));
+// 		sPara.Client.IPandPort.wPort= htons(RemotePort);/////////////////
+// 		sPara.Client.socks=CSsocket[0];
+// 		
+// 		if(!CreateUDPSocket(&SAC,&sPara.Local.socks)) //Create a local UDP socket
+// 			SAC.REP=0x01;
+// 		SAC.Ver=5;
+// 		SAC.ATYP=1;
+// 		if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
+// 			goto exit;
+// 		if(SAC.REP==0x01) // general SOCKS server failure
+// 			goto exit;
+// 		
+// 		sPara.Local.IPandPort=SAC.IPandPort; //Copy local UDPsocket data structure to sPara.Local
+// 		////// Create UDP Transfer thread
+// 		HANDLE ThreadHandle = CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)UDPTransfer,(LPVOID)&sPara,0,NULL);
+// 		if (ThreadHandle)
+// 		{
+// 			//printf("Socks UDP Session-> %s:%d\n",inet_ntoa(in.sin_addr),ntohs(sPara.Client.IPandPort.wPort));
+// 			WaitForSingleObject(ThreadHandle, INFINITE);
+// 			//printf("UDPTransfer Thread Exit.\n");
+// 		}else
+// 			goto exit;
+// 		return 1;
+// 	}
 
 exit:
     return 0;
-}
-
-int Get_IP_Port(SOCKET *CSsocket, char *ReceiveBuf, int DataLen, char *HostName, WORD *RemotePort, IPandPort *IPP)
-{
-	//CSsocket[0] ClientSocket
-	//CSsocket[1] ServerSocket
-
-	DataLen = recv(CSsocket[0],ReceiveBuf,MAXBUFSIZE,0);
-	
-	if(DataLen == SOCKET_ERROR || DataLen == 0)
-		return 0;
-	Socks5Info *Socks5Request=(Socks5Info *)ReceiveBuf;
-	
-	//Get IP Type //0x01==IP V4地址 0x03代表域名;0x04代表IP V6地址;not Support
-	if(Socks5Request->ATYP==1)
-    {
-        *IPP = *(IPandPort *)&Socks5Request->IP_LEN;
-    }
-    else if (Socks5Request->ATYP==3)
-	{
-		if(!GetAddressAndPort(ReceiveBuf, DataLen, Socks5Request->ATYP, HostName, RemotePort))
-			return 0;
-    }
-    else
-        return 0;
-	
-    //Get and return the work mode. 1:TCP CONNECT   3:UDP ASSOCIATE
-    if((Socks5Request->CMD == 1)||(Socks5Request->CMD == 3))
-        return Socks5Request->CMD;
-	
-	return 0;
 }
 
 BOOL CreateUDPSocket(Socks5AnsConn *SAC, SOCKET *socks)
@@ -597,7 +596,7 @@ DWORD WINAPI ProxyThread(SOCKET* CSsocket)
         if ( !Authentication(CSsocket, ReceiveBuf, DataLen) )
             return 0;
 
-        if ( !DoSocks5() )
+        if ( !DoSocks5(CSsocket, ReceiveBuf) )
             return 0;
     }
     else if (ProxyType == 4)
@@ -1101,12 +1100,12 @@ int main(int argc, char* argv[])
 		}
 	}
 
-    SERVICE_TABLE_ENTRYA DispatchTable[]=
-    {
-        {"Sock5Proxy",ServiceMain},
-        {NULL,NULL}
-    };
-    StartServiceCtrlDispatcherA(DispatchTable);
+//     SERVICE_TABLE_ENTRYA DispatchTable[]=
+//     {
+//         {"Sock5Proxy",ServiceMain},
+//         {NULL,NULL}
+//     };
+//     StartServiceCtrlDispatcherA(DispatchTable);
 
     if (!g_ServiceStatusHandle)
     {
