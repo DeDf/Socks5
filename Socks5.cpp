@@ -25,11 +25,6 @@
 SERVICE_STATUS g_ServiceStatus;
 SERVICE_STATUS_HANDLE g_ServiceStatusHandle;
 
-void WINAPI ServiceMain(DWORD argc, LPSTR *argv);
-void WINAPI ServiceCtrlHandler(DWORD Opcode);
-BOOL InstallService();
-BOOL DeleteService();
-
 char ConnectionEstablished[]="HTTP/1.0 200 OK\r\n\r\n";
 
 u_short LisPort = 10086;
@@ -236,7 +231,7 @@ BOOL SendRequest(SOCKET* CSsocket, char *SenderBuf, char *ReceiveBuf, int DataLe
 	return 1;
 }
 
-int Authentication(SOCKET* CSsocket, char *ReceiveBuf, int DataLen)
+int Authentication(SOCKET s, char *ReceiveBuf)
 {
 	Socks5Req *sq = (Socks5Req *)ReceiveBuf;
 
@@ -249,7 +244,7 @@ int Authentication(SOCKET* CSsocket, char *ReceiveBuf, int DataLen)
 		else
 			Method[1]=0x02;
 
-		if(send(CSsocket[0],Method,2,0) == SOCKET_ERROR)
+		if(send(s,Method,2,0) == SOCKET_ERROR)
 			return 0;
 	}else
 		return 0;
@@ -261,7 +256,7 @@ int Authentication(SOCKET* CSsocket, char *ReceiveBuf, int DataLen)
 		memset(USER,0,sizeof(USER));
 		memset(PASS,0,sizeof(PASS));
 
-		DataLen = recv(CSsocket[0],ReceiveBuf,MAXBUFSIZE,0);
+		int DataLen = recv(s,ReceiveBuf,MAXBUFSIZE,0);
 		if(DataLen == SOCKET_ERROR || DataLen == 0)
 			return 0;
 
@@ -287,7 +282,7 @@ int Authentication(SOCKET* CSsocket, char *ReceiveBuf, int DataLen)
 			printf("Invalid Password\n");
 		}
 
-		if(send(CSsocket[0],ReceiveBuf,2,0) == SOCKET_ERROR)
+		if(send(s,ReceiveBuf,2,0) == SOCKET_ERROR)
 			return 0;
 	}
 	
@@ -325,24 +320,8 @@ char *DNS(char *HostName)
 
 int GetAddressAndPort(char *ReceiveBuf, int DataLen, int ATYP, char *HostName, WORD *RemotePort)
 {
-	DWORD Socks5InfoSize = sizeof(Socks5Info);
-	DWORD dwIndex = 0;
-	Socks4Req  *Socks4Request=( Socks4Req *)ReceiveBuf;
 	Socks5Info *Socks5Request=(Socks5Info *)ReceiveBuf;
 	struct sockaddr_in in;
-
-	if(ATYP==2) //Socks v4 !!!
-	{
-		*RemotePort=ntohs(Socks4Request->wPort);
-
-		if(ReceiveBuf[4]!=0x00) //USERID !!
-			in.sin_addr.s_addr = Socks4Request->dwIP;
-		else
-			in.sin_addr.s_addr = inet_addr(DNS((char*)&Socks4Request->other+1));
-
-		memcpy(HostName, inet_ntoa(in.sin_addr),strlen(inet_ntoa(in.sin_addr)));
-		return 1;
-	}
 	
 	if( (Socks5Request->Ver==0)&&(Socks5Request->CMD==0) )
     {
@@ -368,38 +347,64 @@ int GetAddressAndPort(char *ReceiveBuf, int DataLen, int ATYP, char *HostName, W
 	return 1;
 }
 
-BOOL ConnectToRemoteHost(SOCKET *ServerSocket,char *HostName,const WORD RemotePort)
+SOCKET ConnectToRemoteHost2(IPandPort *pIPP)
 {
-	struct sockaddr_in Server;
-	memset(&Server, 0, sizeof(Server));
-	
-	Server.sin_family = AF_INET;
-	Server.sin_port = htons(RemotePort);
-	
-	if (inet_addr(HostName) != INADDR_NONE)
-		Server.sin_addr.s_addr = inet_addr(HostName);
-	else
-	{
-		if (DNS(HostName) != NULL)
-			Server.sin_addr.s_addr = inet_addr(DNS(HostName));
-		else
-			return FALSE;
-	}
 	// Create Socket
-	*ServerSocket = socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
-	if (*ServerSocket == INVALID_SOCKET)
-		return FALSE;
+    SOCKET ServerSocket = socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+	if (ServerSocket == INVALID_SOCKET)
+		return NULL;
+
+    struct sockaddr_in Server;
+    memset(&Server, 0, sizeof(Server));
+
+    Server.sin_family = AF_INET;
+    Server.sin_addr.s_addr = pIPP->dwIP;
+    Server.sin_port = pIPP->wPort;
 
 	UINT TimeOut = TIMEOUT;
-	setsockopt(*ServerSocket,SOL_SOCKET,SO_RCVTIMEO,(char *)&TimeOut,sizeof(TimeOut));
-	if (connect(*ServerSocket, (const SOCKADDR *)&Server,sizeof(Server)) == SOCKET_ERROR)
+	setsockopt(ServerSocket,SOL_SOCKET,SO_RCVTIMEO,(char *)&TimeOut,sizeof(TimeOut));
+	if (connect(ServerSocket, (const SOCKADDR *)&Server,sizeof(Server)) == SOCKET_ERROR)
 	{
 		printf("Fail To Connect To Remote Host\n");
-		closesocket(*ServerSocket);
-		return FALSE;
+		closesocket(ServerSocket);
+        return NULL;
 	}
 	
-	return TRUE;
+	return ServerSocket;
+}
+
+BOOL ConnectToRemoteHost(SOCKET *ServerSocket,char *HostName,const WORD RemotePort)
+{
+    struct sockaddr_in Server;
+    memset(&Server, 0, sizeof(Server));
+
+    Server.sin_family = AF_INET;
+    Server.sin_port = htons(RemotePort);
+
+    if (inet_addr(HostName) != INADDR_NONE)
+        Server.sin_addr.s_addr = inet_addr(HostName);
+    else
+    {
+        if (DNS(HostName) != NULL)
+            Server.sin_addr.s_addr = inet_addr(DNS(HostName));
+        else
+            return FALSE;
+    }
+    // Create Socket
+    *ServerSocket = socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+    if (*ServerSocket == INVALID_SOCKET)
+        return FALSE;
+
+    UINT TimeOut = TIMEOUT;
+    setsockopt(*ServerSocket,SOL_SOCKET,SO_RCVTIMEO,(char *)&TimeOut,sizeof(TimeOut));
+    if (connect(*ServerSocket, (const SOCKADDR *)&Server,sizeof(Server)) == SOCKET_ERROR)
+    {
+        printf("Fail To Connect To Remote Host\n");
+        closesocket(*ServerSocket);
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 int Get_IP_Port(SOCKET s, char *ReceiveBuf, IPandPort *IPP)
@@ -441,8 +446,42 @@ int Get_IP_Port(SOCKET s, char *ReceiveBuf, IPandPort *IPP)
     return 0;
 }
 
+BOOL CreateUDPSocket(Socks5AnsConn *SAC, SOCKET *socks)
+{
+    SOCKET Locals = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if(Locals == SOCKET_ERROR)
+        return 0;
+
+    struct sockaddr_in UDPServer;
+    UDPServer.sin_family=AF_INET;
+    UDPServer.sin_addr.s_addr=INADDR_ANY;
+    UDPServer.sin_port=INADDR_ANY;
+
+    if(bind(Locals,(SOCKADDR*)&UDPServer, sizeof(UDPServer)) == SOCKET_ERROR)
+    {
+        printf("UDP socket bind failed.\n");
+        return 0;
+    }
+
+    //UINT TimeOut = TIMEOUT;
+    //setsockopt(Locals,SOL_SOCKET,SO_RCVTIMEO,(char *)&TimeOut,sizeof(TimeOut));
+    *socks = Locals;
+
+    struct sockaddr_in in;
+    memset(&in,0,sizeof(sockaddr_in));
+    int structsize=sizeof(sockaddr_in);
+    getsockname(Locals, (struct sockaddr *)&in, &structsize);
+    SAC->IPandPort.dwIP  = in.sin_addr.s_addr;
+    SAC->IPandPort.wPort = in.sin_port;
+
+    return 1;
+}
+
 BOOL DoSocks5(SOCKET *CSsocket, char *ReceiveBuf)
 {
+    if ( !Authentication(CSsocket[0], ReceiveBuf) )
+        goto exit;
+
     Socks5AnsConn SAC;
 	memset(&SAC,0,sizeof(SAC));
     SAC.Ver=0x05;
@@ -463,158 +502,97 @@ BOOL DoSocks5(SOCKET *CSsocket, char *ReceiveBuf)
 	}
 	else if(Flag==1) //TCP CONNECT
 	{
-        {
-            // Create Socket
-            CSsocket[1] = socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
-            if (CSsocket[1] == INVALID_SOCKET)
-                goto SendToClient;
+        CSsocket[1] = ConnectToRemoteHost2(&IPP);
+        if (CSsocket[1])
+            SAC.REP=0x00;
 
-            struct sockaddr_in Server;
-            memset(&Server, 0, sizeof(Server));
-
-            Server.sin_family = AF_INET;
-            Server.sin_addr.s_addr = IPP.dwIP;
-            Server.sin_port = IPP.wPort;
-
-            UINT TimeOut = TIMEOUT;
-            setsockopt(CSsocket[1],SOL_SOCKET,SO_RCVTIMEO,(char *)&TimeOut,sizeof(TimeOut));
-            if (connect(CSsocket[1], (const SOCKADDR *)&Server,sizeof(Server)) == SOCKET_ERROR)
-            {
-                printf("Fail To Connect To Remote Host\n");
-                closesocket(CSsocket[1]);
-            }
-            else
-                SAC.REP=0x00;
-        }
-
-SendToClient:
         if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
 			goto exit;
 
-		if(SAC.REP==0x01) // general SOCKS server failure
+		if(SAC.REP==0x01)
 			goto exit;
 
         return 1;
 	}
-// 	else if(Flag==3) //UDP ASSOCIATE
-// 	{
-//         Socks5Para sPara;
-//         struct sockaddr_in in;
-//         memset(&sPara,0,sizeof(Socks5Para));
-//         memset(&in,0,sizeof(sockaddr_in));
-//         int structsize=sizeof(sockaddr_in);
-// 
-// 		//Save the client connection information(client IP and source port)
-// 		getpeername(CSsocket[0],(struct sockaddr *)&in,&structsize);
-// 		if(inet_addr(HostName)==0)
-// 			sPara.Client.IPandPort.dwIP = in.sin_addr.s_addr;
-// 		else
-// 			sPara.Client.IPandPort.dwIP = inet_addr(DNS(HostName));
-// 		
-// 		////printf("Accept ip:%s\n",inet_ntoa(in.sin_addr));
-// 		sPara.Client.IPandPort.wPort= htons(RemotePort);/////////////////
-// 		sPara.Client.socks=CSsocket[0];
-// 		
-// 		if(!CreateUDPSocket(&SAC,&sPara.Local.socks)) //Create a local UDP socket
-// 			SAC.REP=0x01;
-// 		SAC.Ver=5;
-// 		SAC.ATYP=1;
-// 		if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
-// 			goto exit;
-// 		if(SAC.REP==0x01) // general SOCKS server failure
-// 			goto exit;
-// 		
-// 		sPara.Local.IPandPort=SAC.IPandPort; //Copy local UDPsocket data structure to sPara.Local
-// 		////// Create UDP Transfer thread
-// 		HANDLE ThreadHandle = CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)UDPTransfer,(LPVOID)&sPara,0,NULL);
-// 		if (ThreadHandle)
-// 		{
-// 			//printf("Socks UDP Session-> %s:%d\n",inet_ntoa(in.sin_addr),ntohs(sPara.Client.IPandPort.wPort));
-// 			WaitForSingleObject(ThreadHandle, INFINITE);
-// 			//printf("UDPTransfer Thread Exit.\n");
-// 		}else
-// 			goto exit;
-// 		return 1;
-// 	}
+	else if(Flag==3) //UDP ASSOCIATE
+	{
+        Socks5Para sPara;
+        memset(&sPara,0,sizeof(Socks5Para));
+
+        struct sockaddr_in in;
+        memset(&in,0,sizeof(sockaddr_in));
+        int structsize=sizeof(sockaddr_in);
+		getpeername(CSsocket[0], (struct sockaddr *)&in, &structsize);  //Save the client connection information(client IP and source port)
+        sPara.Client.socks=CSsocket[0];
+		sPara.Client.IPandPort.dwIP = in.sin_addr.s_addr;
+		sPara.Client.IPandPort.wPort= in.sin_port;
+		
+		if( CreateUDPSocket(&SAC, &sPara.Local.socks) )
+			SAC.REP=0x00;
+
+		if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
+			goto exit;
+
+		if(SAC.REP==0x01)
+			goto exit;
+		
+		sPara.Local.IPandPort = SAC.IPandPort;
+		UDPTransfer(&sPara);
+	}
 
 exit:
     return 0;
 }
 
-BOOL CreateUDPSocket(Socks5AnsConn *SAC, SOCKET *socks)
-{
-	char szIP[256];
-	struct sockaddr_in UDPServer;
-	struct sockaddr_in in;
-	memset(&in,0,sizeof(sockaddr_in));
-	int structsize=sizeof(sockaddr_in);
-	UDPServer.sin_family=AF_INET;
-	UDPServer.sin_addr.s_addr= INADDR_ANY;
-	UDPServer.sin_port=INADDR_ANY;
-	SOCKET Locals = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-	if(Locals == SOCKET_ERROR)
-	{
-		//printf("UDP socket create failed.\n");
-		return 0;
-	}
-	if(bind(Locals,(SOCKADDR*)&UDPServer, sizeof(UDPServer)) == SOCKET_ERROR)
-	{
-		//printf("UDP socket bind failed.\n");
-		return 0;
-	}
-	UINT TimeOut = TIMEOUT;
-	//setsockopt(Locals,SOL_SOCKET,SO_RCVTIMEO,(char *)&TimeOut,sizeof(TimeOut));
-	*socks = Locals;
-	getsockname(Locals,(struct sockaddr *)&in,&structsize);
-	SAC->IPandPort.dwIP = inet_addr(GetInetIP(szIP));
-	SAC->IPandPort.wPort = in.sin_port;
-	//printf("UDP Bound to %s:%d\r\n", szIP, ntohs(in.sin_port));
-	return 1;
-}
-
 DWORD WINAPI ProxyThread(SOCKET* CSsocket)
 {
     // 申请ReceiveBuf，接收client发来的第一条消息
-	char *ReceiveBuf = (char*)malloc(sizeof(char)*MAXBUFSIZE);
+    int DataLen;
+	char *ReceiveBuf = (char*)malloc(MAXBUFSIZE);
+    if ( !ReceiveBuf)
+        goto exit;
+
     memset(ReceiveBuf,0,MAXBUFSIZE);
-    int DataLen = recv(CSsocket[0],ReceiveBuf,MAXBUFSIZE,0);
-    if(DataLen == 0)
-    {
-        free(ReceiveBuf);
-        return 0;
-    }
+    DataLen = recv(CSsocket[0],ReceiveBuf,MAXBUFSIZE,0);
+    if( DataLen == SOCKET_ERROR || DataLen == 0 )
+        goto exit;
+
 
     // 判断代理类型，1代表是http代理，4是Socks4，5是Socks5，其他不支持直接return。
-    char *SenderBuf = NULL;
-    WORD RemotePort = 0;
-    char *HostName = (char*)malloc(sizeof(char)*MAX_HOSTNAME);
-    memset(HostName,0,MAX_HOSTNAME);
-
     int ProxyType = ReceiveBuf[0];
     if (ProxyType == 5)
     {
-        if ( !Authentication(CSsocket, ReceiveBuf, DataLen) )
-            return 0;
-
         if ( !DoSocks5(CSsocket, ReceiveBuf) )
-            return 0;
+            goto exit;
     }
     else if (ProxyType == 4)
     {
-        if(!GetAddressAndPort(ReceiveBuf, DataLen, 2, HostName, &RemotePort))
-            return 0;
+        Socks4Req *Socks4Request = (Socks4Req *)ReceiveBuf;
+        IPandPort IPP;
+        IPP.wPort = Socks4Request->wPort;
 
-        Socks4Req Socks4Request;
-        memset(&Socks4Request, 0, 9);
-        if(!ConnectToRemoteHost(&CSsocket[1],HostName,RemotePort))
-            Socks4Request.REP = 0x5B; //REJECT 拒绝
+        if(ReceiveBuf[4]!=0x00) //USERID !!
+            IPP.dwIP = Socks4Request->dwIP;
         else
-            Socks4Request.REP = 0x5A; //GRANT 准许
+        {
+            HOSTENT *hostent = gethostbyname( (char*)&Socks4Request->other+1 );
+            if (hostent == NULL)
+                goto exit;
 
-        if(send(CSsocket[0], (char *)&Socks4Request, 8, 0) == SOCKET_ERROR)
+            IPP.dwIP = **(PULONG*)hostent->h_addr_list;
+        }
+
+        memset(Socks4Request, 0, 9);
+        CSsocket[1] = ConnectToRemoteHost2(&IPP);
+        if( CSsocket[1] )
+            Socks4Request->REP = 0x5A; //GRANT 准许
+        else
+            Socks4Request->REP = 0x5B; //REJECT 拒绝
+
+        if(send(CSsocket[0], (char *)Socks4Request, 8, 0) == SOCKET_ERROR)
             goto exit;
 
-        if(Socks4Request.REP==0x5B)   //ConnectToRemoteHost failed,closesocket and free some point.
+        if(Socks4Request->REP==0x5B)
             goto exit;
     }
     else
@@ -625,37 +603,26 @@ DWORD WINAPI ProxyThread(SOCKET* CSsocket)
         {
             ProxyType = 1;  // 1代表是http代理
 
-            SenderBuf = (char*)malloc(sizeof(char)*MAXBUFSIZE);
-            memset(SenderBuf,0,MAXBUFSIZE);
-            if(SendRequest(CSsocket, SenderBuf, ReceiveBuf, DataLen)) //http proxy
-                goto exit;
-        }
-        else
-        {
-            free(ReceiveBuf);
-            return 0;
+            char *SenderBuf = (char*)malloc(MAXBUFSIZE);
+            if (SenderBuf)
+            {
+                memset(SenderBuf,0,MAXBUFSIZE);
+                if(SendRequest(CSsocket, SenderBuf, ReceiveBuf, DataLen)) //http proxy
+                    free(SenderBuf);
+            }
         }
     }
-
-    /////////////////////////////////////////////
 	
 	if(CSsocket[0] && CSsocket[1])
-	{
-		//printf("Socks TCP Session-> %s:%d\n",HostName,RemotePort);
-		HANDLE ThreadHandle = CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)TCPTransfer,(LPVOID)CSsocket,0,NULL);
-		if (ThreadHandle)
-			WaitForSingleObject(ThreadHandle, INFINITE);
-	}
+		TCPTransfer(CSsocket);
 
 exit:
+    if (CSsocket[1])
+        closesocket(CSsocket[1]);
 	closesocket(CSsocket[0]);
-	closesocket(CSsocket[1]);
 	free(CSsocket);
-	free(HostName);
-    if (SenderBuf)
-	    free(SenderBuf);
-    //
-	free(ReceiveBuf);
+    if (ReceiveBuf)
+	    free(ReceiveBuf);
 	return 0;
 }
 
@@ -693,7 +660,7 @@ BOOL StartProxy()  // done!
 		if (CSsocket)
 		{
             CSsocket[0] = AcceptSocket;
-            CSsocket[1] = SOCKET_ERROR;
+            CSsocket[1] = NULL;
             HANDLE hThread = CreateThread (NULL,0,(LPTHREAD_START_ROUTINE)ProxyThread,CSsocket,0,&dwThreadID);
             if (hThread)
                 CloseHandle(hThread);
@@ -721,8 +688,9 @@ int UDPSend(SOCKET s, char *buff, int nBufSize, struct sockaddr_in *to,int tolen
 
 void UDPTransfer(Socks5Para *sPara)
 {
+    int result;
 	struct sockaddr_in SenderAddr;
-	int   SenderAddrSize=sizeof(SenderAddr),DataLength=0,result;
+	int   SenderAddrSize=sizeof(SenderAddr),DataLength=0;
 	char RecvBuf[MAXBUFSIZE];
 	
 	struct sockaddr_in UDPClient,UDPServer;
@@ -732,6 +700,7 @@ void UDPTransfer(Socks5Para *sPara)
 	UDPClient.sin_family = AF_INET;
 	UDPClient.sin_addr.s_addr = sPara->Client.IPandPort.dwIP;
 	UDPClient.sin_port = sPara->Client.IPandPort.wPort;
+
 	/*/test
 	Socks5UDPHead test;
 	memset(&test,0,sizeof(Socks5UDPHead));
@@ -743,7 +712,6 @@ void UDPTransfer(Socks5Para *sPara)
 	//printf("test sendto server error.\n");
 	return;
 }*/
-	//printf("UDPTransfer thread start......\n");
 	
 	fd_set readfd;
 	while(1)
@@ -973,20 +941,42 @@ void TCPTransfer(SOCKET* CSsocket)
     closesocket(ServerSocket);
 }
 
+
+void WINAPI ServiceCtrlHandler(DWORD Opcode)
+{
+    switch(Opcode)
+    {
+    case SERVICE_CONTROL_PAUSE: 
+        g_ServiceStatus.dwCurrentState  = SERVICE_PAUSED;
+        break;
+    case SERVICE_CONTROL_CONTINUE:
+        g_ServiceStatus.dwCurrentState  = SERVICE_RUNNING;
+        break;
+    case SERVICE_CONTROL_STOP:
+        g_ServiceStatus.dwWin32ExitCode = 0;
+        g_ServiceStatus.dwCurrentState  = SERVICE_STOPPED;
+        g_ServiceStatus.dwCheckPoint    = 0;
+        g_ServiceStatus.dwWaitHint      = 0;
+        break;
+    }
+
+    SetServiceStatus (g_ServiceStatusHandle,&g_ServiceStatus);
+}
+
 void WINAPI ServiceMain(DWORD argc, LPSTR *argv)
 {
-	g_ServiceStatus.dwServiceType      = SERVICE_WIN32;
-	g_ServiceStatus.dwCurrentState     = SERVICE_START_PENDING;
-	g_ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
-	g_ServiceStatus.dwWin32ExitCode    = 0;
-	g_ServiceStatus.dwServiceSpecificExitCode = 0;
-	g_ServiceStatus.dwCheckPoint       = 0;
-	g_ServiceStatus.dwWaitHint         = 0;
-	
-	g_ServiceStatusHandle = 
+    g_ServiceStatus.dwServiceType      = SERVICE_WIN32;
+    g_ServiceStatus.dwCurrentState     = SERVICE_START_PENDING;
+    g_ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
+    g_ServiceStatus.dwWin32ExitCode    = 0;
+    g_ServiceStatus.dwServiceSpecificExitCode = 0;
+    g_ServiceStatus.dwCheckPoint       = 0;
+    g_ServiceStatus.dwWaitHint         = 0;
+
+    g_ServiceStatusHandle = 
         RegisterServiceCtrlHandlerA("Socks5Proxy", ServiceCtrlHandler); 
-	if (g_ServiceStatusHandle)
-	{
+    if (g_ServiceStatusHandle)
+    {
         g_ServiceStatus.dwCurrentState = SERVICE_RUNNING;
         g_ServiceStatus.dwCheckPoint = 0;
         g_ServiceStatus.dwWaitHint   = 0;
@@ -995,27 +985,6 @@ void WINAPI ServiceMain(DWORD argc, LPSTR *argv)
         StartProxy();
         WSACleanup();
     }
-}
-
-void WINAPI ServiceCtrlHandler(DWORD Opcode)
-{
-	switch(Opcode)
-	{
-    case SERVICE_CONTROL_PAUSE: 
-		g_ServiceStatus.dwCurrentState  = SERVICE_PAUSED;
-		break;
-    case SERVICE_CONTROL_CONTINUE:
-		g_ServiceStatus.dwCurrentState  = SERVICE_RUNNING;
-		break;
-    case SERVICE_CONTROL_STOP:
-		g_ServiceStatus.dwWin32ExitCode = 0;
-		g_ServiceStatus.dwCurrentState  = SERVICE_STOPPED;
-		g_ServiceStatus.dwCheckPoint    = 0;
-		g_ServiceStatus.dwWaitHint      = 0;
-		break;
-	}
-
-    SetServiceStatus (g_ServiceStatusHandle,&g_ServiceStatus);
 }
 
 BOOL InstallService()  // done!
@@ -1061,7 +1030,7 @@ BOOL DeleteService()  // done!
 {
     BOOL ret = false;
 
-	SC_HANDLE hSCManager = OpenSCManager(NULL,NULL,SC_MANAGER_ALL_ACCESS);
+    SC_HANDLE hSCManager = OpenSCManager(NULL,NULL,SC_MANAGER_ALL_ACCESS);
     if (hSCManager)
     {
         SC_HANDLE hService = OpenServiceA(hSCManager,"Socks5Proxy",SERVICE_ALL_ACCESS);
@@ -1073,8 +1042,8 @@ BOOL DeleteService()  // done!
         }
         CloseServiceHandle(hSCManager);
     }
-	
-	return ret;
+
+    return ret;
 }
 
 int main(int argc, char* argv[])
@@ -1109,7 +1078,7 @@ int main(int argc, char* argv[])
 
     if (!g_ServiceStatusHandle)
     {
-        printf("SOCKS v4 && v5 && Http Proxy V1.0\n");
+        printf("SOCKS4 & SOCKS5 & Http Proxy V1.0\n");
 
         if(argc>2)
         {
@@ -1126,6 +1095,10 @@ int main(int argc, char* argv[])
                     printf("Username %s Password %s\n", Username, Password);
                 }
             }
+        }
+        else
+        {
+            printf(" ~ ProxyPort = %d\n", LisPort);
         }
 
         StartProxy();
