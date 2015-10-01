@@ -15,17 +15,15 @@
 #pragma comment(lib,"ws2_32.lib")
 
 #define MAX_HOSTNAME 256
-#define DEFAULTPORT  80
 #define DEFLISNUM    50
 #define MAXBUFSIZE   20480
 #define TIMEOUT      10000
-
-#define HEADLEN    7
+#define HEADLEN      7
 
 SERVICE_STATUS g_ServiceStatus;
 SERVICE_STATUS_HANDLE g_ServiceStatusHandle;
 
-char ConnectionEstablished[]="HTTP/1.0 200 OK\r\n\r\n";
+char HTTP_200_OK[]="HTTP/1.0 200 OK\r\n\r\n";
 
 u_short LisPort = 10086;
 char Username[256]="\0";
@@ -87,11 +85,13 @@ typedef struct
 	IPandPort IPandPort;
 	// BYTE DATA;
 }Socks5UDPHead;
+
 struct SocketInfo
 {
 	SOCKET socks;
 	IPandPort IPandPort;
 };
+
 typedef struct
 {
 	SocketInfo Local;
@@ -120,8 +120,6 @@ void GetHostNameAndPort(char *ReceiveBuf,int datalen,char *HostName,UINT *Remote
 
 		if(*p == ':')
 			*RemotePort=atoi(p+1);
-		else
-            *RemotePort=DEFAULTPORT;
 	}
 }
 //---------------------------------------------------------------------------
@@ -139,7 +137,7 @@ char * GetURLRootPoint(char * ReceiveBuf,int DataLen,int *HostNaneLen)
 }
 //---------------------------------------------------------------------------
 // 检查从client收到的请求buf，看是否为http请求
-int CheckHttpRequest(char *ReceiveBuf,int *MethodLength)  // done!
+int CheckHttpRequest(const char *ReceiveBuf, int *MethodLength)  // done!
 {
 	if(!_strnicmp(ReceiveBuf,"GET ",4))
 	{
@@ -171,17 +169,71 @@ int CheckHttpRequest(char *ReceiveBuf,int *MethodLength)  // done!
 int ModifyRequest(char *SenderBuf,char *ReceiveBuf,int DataLen,int MethodLength)
 {
 	strncpy_s(SenderBuf,MAXBUFSIZE,ReceiveBuf,MethodLength);
-	int HedLen = 0;
-	if(strncmp(ReceiveBuf+MethodLength,"http://",HEADLEN))
+	
+	if(strncmp(ReceiveBuf+MethodLength, "http://", HEADLEN))
 		return 0;
 	
+    int HedLen = 0;
 	char * Getrootfp = GetURLRootPoint(ReceiveBuf+MethodLength+HEADLEN,DataLen-MethodLength-HEADLEN,&HedLen);
 	if(Getrootfp == NULL)
 		return 0;
 	
-	memcpy(SenderBuf+MethodLength,Getrootfp,DataLen-MethodLength-HEADLEN-HedLen);
+	memcpy(SenderBuf+MethodLength, Getrootfp, DataLen-MethodLength-HEADLEN-HedLen);
 	
 	return DataLen-HEADLEN-HedLen;
+}
+
+BOOL HttpProxy(SOCKET* CSsocket, char *ReceiveBuf, int DataLen)
+{
+    int MethodLength;
+    int Flag = CheckHttpRequest(ReceiveBuf, &MethodLength);
+    if (!Flag)
+        goto exit;
+
+    char *SenderBuf = (char*)malloc(MAXBUFSIZE);
+    if (SenderBuf)
+    {
+        memset(SenderBuf,0,MAXBUFSIZE);
+
+        char HostName[MAX_HOSTNAME] = {0};
+        UINT RemotePort = 80;
+
+        if(Flag==1 || Flag==2 || Flag==3)
+        {
+            int SendLength=ModifyRequest(SenderBuf,ReceiveBuf,DataLen,MethodLength);
+            if(!SendLength)
+                return 0;
+
+            GetHostNameAndPort(ReceiveBuf+MethodLength+HEADLEN,
+                DataLen-MethodLength-HEADLEN,
+                HostName,
+                &RemotePort);
+
+            if(!ConnectToRemoteHost(&CSsocket[1],HostName,RemotePort))
+                return 0;
+
+            if(send(CSsocket[1],SenderBuf,SendLength,0) == SOCKET_ERROR)
+                return 0;
+        }
+        else if(Flag==4)
+        {
+            GetHostNameAndPort(ReceiveBuf+MethodLength,
+                DataLen-MethodLength,
+                HostName,
+                &RemotePort);
+
+            if(!ConnectToRemoteHost(&CSsocket[1],HostName,RemotePort))
+                return 0;
+
+            send(CSsocket[0], HTTP_200_OK, (int)strlen(HTTP_200_OK)+1, 0);
+        }
+
+        free(SenderBuf);
+        return 1;
+    }
+
+exit:
+    return 0;
 }
 
 BOOL SendRequest(SOCKET* CSsocket, char *SenderBuf, char *ReceiveBuf, int DataLen)
@@ -192,7 +244,7 @@ BOOL SendRequest(SOCKET* CSsocket, char *SenderBuf, char *ReceiveBuf, int DataLe
         return 0;
 	
     char HostName[MAX_HOSTNAME] = {0};
-    UINT RemotePort = 0;
+    UINT RemotePort = 80;
 
 	if(Flag==1 || Flag==2 || Flag==3)
 	{
@@ -216,7 +268,7 @@ BOOL SendRequest(SOCKET* CSsocket, char *SenderBuf, char *ReceiveBuf, int DataLe
 		if(!ConnectToRemoteHost(&CSsocket[1],HostName,RemotePort))
 			return 0;
 
-		send(CSsocket[0], ConnectionEstablished, (int)strlen(ConnectionEstablished)+1,0);
+		send(CSsocket[0], HTTP_200_OK, (int)strlen(HTTP_200_OK)+1,0);
 	}
 
 	if(CSsocket[0] && CSsocket[1])
@@ -289,33 +341,13 @@ int Authentication(SOCKET s, char *ReceiveBuf)
 	return 1;
 }
 
-char *GetInetIP(char *OutIP)
-{
-	// Get host adresses
-	char addr[16];
-	struct hostent * pHost;
-	pHost = gethostbyname("");
-	for( int i = 0; pHost!= NULL && pHost->h_addr_list[i]!= NULL; i++ )
-	{
-		OutIP[0]=0;
-		for( int j = 0; j < pHost->h_length; j++ )
-		{
-			if( j > 0 ) strcat(OutIP,".");
-			sprintf(addr,"%u", (unsigned int)((unsigned char*)pHost->h_addr_list[i])[j]);
-			strcat(OutIP,addr);
-		}
-	}
-	return OutIP;
-}
-
-char *DNS(char *HostName)
+ULONG DNS(char *HostName)
 {
 	HOSTENT *hostent = gethostbyname(HostName);
 	if (hostent == NULL)
-		return NULL;
+		return 0;
 
-	IN_ADDR iaddr = *((LPIN_ADDR)*hostent->h_addr_list);
-	return inet_ntoa(iaddr);
+	return **(PULONG*)hostent->h_addr_list;
 }
 
 int GetAddressAndPort(char *ReceiveBuf, int DataLen, int ATYP, char *HostName, WORD *RemotePort)
@@ -347,7 +379,7 @@ int GetAddressAndPort(char *ReceiveBuf, int DataLen, int ATYP, char *HostName, W
 	return 1;
 }
 
-SOCKET ConnectToRemoteHost2(IPandPort *pIPP)
+SOCKET ConnectToRemoteIP(IPandPort *pIPP)
 {
 	// Create Socket
     SOCKET ServerSocket = socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
@@ -384,12 +416,8 @@ BOOL ConnectToRemoteHost(SOCKET *ServerSocket,char *HostName,const WORD RemotePo
     if (inet_addr(HostName) != INADDR_NONE)
         Server.sin_addr.s_addr = inet_addr(HostName);
     else
-    {
-        if (DNS(HostName) != NULL)
-            Server.sin_addr.s_addr = inet_addr(DNS(HostName));
-        else
-            return FALSE;
-    }
+        Server.sin_addr.s_addr = DNS(HostName);
+
     // Create Socket
     *ServerSocket = socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
     if (*ServerSocket == INVALID_SOCKET)
@@ -502,7 +530,7 @@ BOOL DoSocks5(SOCKET *CSsocket, char *ReceiveBuf)
 	}
 	else if(Flag==1) //TCP CONNECT
 	{
-        CSsocket[1] = ConnectToRemoteHost2(&IPP);
+        CSsocket[1] = ConnectToRemoteIP(&IPP);
         if (CSsocket[1])
             SAC.REP=0x00;
 
@@ -583,9 +611,9 @@ DWORD WINAPI ProxyThread(SOCKET* CSsocket)
         }
 
         memset(Socks4Request, 0, 9);
-        CSsocket[1] = ConnectToRemoteHost2(&IPP);
+        CSsocket[1] = ConnectToRemoteIP(&IPP);
         if( CSsocket[1] )
-            Socks4Request->REP = 0x5A; //GRANT 准许
+            Socks4Request->REP = 0x5A; //GRANT  准许
         else
             Socks4Request->REP = 0x5B; //REJECT 拒绝
 
@@ -597,20 +625,8 @@ DWORD WINAPI ProxyThread(SOCKET* CSsocket)
     }
     else
     {
-        int MethodLength;
-        ProxyType = CheckHttpRequest(ReceiveBuf, &MethodLength);
-        if (ProxyType)
-        {
-            ProxyType = 1;  // 1代表是http代理
-
-            char *SenderBuf = (char*)malloc(MAXBUFSIZE);
-            if (SenderBuf)
-            {
-                memset(SenderBuf,0,MAXBUFSIZE);
-                if(SendRequest(CSsocket, SenderBuf, ReceiveBuf, DataLen)) //http proxy
-                    free(SenderBuf);
-            }
-        }
+        if ( !HttpProxy(CSsocket, ReceiveBuf, DataLen) )
+            goto exit;
     }
 	
 	if(CSsocket[0] && CSsocket[1])
@@ -752,7 +768,7 @@ void UDPTransfer(Socks5Para *sPara)
 					////printf("IP: %s:%d || DataPoint: %d\n",HostName,RemotePort,DataPoint);
 					
 					UDPServer.sin_family=AF_INET;
-					UDPServer.sin_addr.s_addr= inet_addr(DNS(HostName));
+					UDPServer.sin_addr.s_addr= DNS(HostName);
 					UDPServer.sin_port=htons(RemotePort);
 					
 					result=UDPSend(sPara->Local.socks,RecvBuf+10+DataPoint, DataLength-DataPoint,&UDPServer,sizeof(UDPServer));
@@ -974,7 +990,7 @@ void WINAPI ServiceMain(DWORD argc, LPSTR *argv)
     g_ServiceStatus.dwWaitHint         = 0;
 
     g_ServiceStatusHandle = 
-        RegisterServiceCtrlHandlerA("Socks5Proxy", ServiceCtrlHandler); 
+        RegisterServiceCtrlHandlerA("socks5", ServiceCtrlHandler); 
     if (g_ServiceStatusHandle)
     {
         g_ServiceStatus.dwCurrentState = SERVICE_RUNNING;
@@ -999,8 +1015,8 @@ BOOL InstallService()  // done!
     if (schSCManager) 
     {
         SC_HANDLE hService = CreateServiceW(schSCManager,
-            L"Socks5Proxy",            // service name
-            L"Socks5Proxy",            // display name 
+            L"socks5",            // service name
+            L"socks5",            // display name 
             SERVICE_ALL_ACCESS,        // desired access 
             SERVICE_WIN32_OWN_PROCESS, // service type 
             SERVICE_AUTO_START,        // start type 
@@ -1033,7 +1049,7 @@ BOOL DeleteService()  // done!
     SC_HANDLE hSCManager = OpenSCManager(NULL,NULL,SC_MANAGER_ALL_ACCESS);
     if (hSCManager)
     {
-        SC_HANDLE hService = OpenServiceA(hSCManager,"Socks5Proxy",SERVICE_ALL_ACCESS);
+        SC_HANDLE hService = OpenServiceA(hSCManager,"socks5",SERVICE_ALL_ACCESS);
         if (hService)
         {
             if(DeleteService(hService))
@@ -1071,7 +1087,7 @@ int main(int argc, char* argv[])
 
 //     SERVICE_TABLE_ENTRYA DispatchTable[]=
 //     {
-//         {"Sock5Proxy",ServiceMain},
+//         {"socks5",ServiceMain},
 //         {NULL,NULL}
 //     };
 //     StartServiceCtrlDispatcherA(DispatchTable);
