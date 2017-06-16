@@ -89,7 +89,7 @@ typedef struct
 struct SocketInfo
 {
 	SOCKET socks;
-	IPandPort IPandPort;
+	IP_PORT IP_Port;
 };
 
 typedef struct
@@ -552,8 +552,8 @@ BOOL DoSocks5(SOCKET *CSsocket, char *ReceiveBuf)
         int structsize=sizeof(sockaddr_in);
 		getpeername(CSsocket[0], (struct sockaddr *)&in, &structsize);  //Save the client connection information(client IP and source port)
         sPara.Client.socks=CSsocket[0];
-		sPara.Client.IPandPort.dwIP = in.sin_addr.s_addr;
-		sPara.Client.IPandPort.wPort= in.sin_port;
+		sPara.Client.IP_Port.IP = in.sin_addr.s_addr;
+		sPara.Client.IP_Port.Port= in.sin_port;
 		
 		if( CreateUDPSocket(&SAC, &sPara.Local.socks) )
 			SAC.REP=0x00;
@@ -564,7 +564,7 @@ BOOL DoSocks5(SOCKET *CSsocket, char *ReceiveBuf)
 		if(SAC.REP==0x01)
 			goto exit;
 		
-		sPara.Local.IPandPort = SAC.IP_PORT;
+		sPara.Local.IP_Port = SAC.IP_PORT;
 		UDPTransfer(&sPara);
 	}
 
@@ -714,8 +714,8 @@ void UDPTransfer(Socks5Para *sPara)
 	memset(&UDPServer,0,sizeof(sockaddr_in));
 	
 	UDPClient.sin_family = AF_INET;
-	UDPClient.sin_addr.s_addr = sPara->Client.IPandPort.dwIP;
-	UDPClient.sin_port = sPara->Client.IPandPort.wPort;
+	UDPClient.sin_addr.s_addr = sPara->Client.IP_Port.IP;
+	UDPClient.sin_port = sPara->Client.IP_Port.Port;
 
 	/*/test
 	Socks5UDPHead test;
@@ -753,7 +753,7 @@ void UDPTransfer(Socks5Para *sPara)
 				//printf("UDPTransfer recvfrom error.\n");
 				break;
 			}//SenderAddr.sin_addr.s_addr==sPara->Client.IPandPort.dwIP&&
-			if(SenderAddr.sin_port==sPara->Client.IPandPort.wPort)//Data come from client
+			if(SenderAddr.sin_port==sPara->Client.IP_Port.Port)//Data come from client
 			{
 				//////这里要先修改udp数据报头
 				WORD RemotePort = 0;
@@ -787,7 +787,7 @@ void UDPTransfer(Socks5Para *sPara)
 				Socks5UDPHead *UDPHead = (Socks5UDPHead*)RecvBuf;
 				memset(UDPHead,0,10);
 				UDPHead->ATYP=0x01;
-				UDPHead->IP_PORT=sPara->Client.IPandPort;
+				UDPHead->IP_PORT=sPara->Client.IP_Port;
 				//UDPHead->IPandPort.dwIP =SenderAddr.sin_addr.s_addr;
 				//UDPHead->IPandPort.wPort=SenderAddr.sin_port;
 				//memcpy(&UDPHead->DATA-2,RecvBuf,DataLength);//UDPHead->DATA-2!!!!!!!!!!!!
