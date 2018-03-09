@@ -1,33 +1,24 @@
 /*
-    SOCKS v4 && v5 && Http Proxy
+    SOCKS v4 && v5 && Http Proxy Server
     usage:
         双击 - 直接启动，默认端口10086
-        Socks5 -i 安装为服务
-        Socks5 -u 删除服务
-        Socks5 -p PORT USER PASS
+        Socks5 [port] [UserName] [PassWord]
 */
 #include <winsock2.h>
-#include <Windows.h>
-#include <Winsvc.h>
 #include <stdio.h>
 #include <errno.h>
 
 #pragma comment(lib,"ws2_32.lib")
 
 #define MAX_HOSTNAME 256
-#define DEFLISNUM    50
 #define MAXBUFSIZE   20480
 #define TIMEOUT      10000
 #define HEADLEN      7
 
-SERVICE_STATUS g_ServiceStatus;
-SERVICE_STATUS_HANDLE g_ServiceStatusHandle;
-
 char HTTP_200_OK[]="HTTP/1.0 200 OK\r\n\r\n";
 
-u_short LisPort = 10086;
-char Username[256]="\0";
-char Password[256]="\0";
+char g_Username[256];
+char g_Password[256];
 
 struct Socks4Req
 {
@@ -291,7 +282,7 @@ int Authentication(SOCKET s, char *ReceiveBuf)
 
 	if((sq->Methods[0]==0)||(sq->Methods[0]==2))//00，无需认证；01，GSSAPI；02，需要用户名和PASSWORD
 	{
-		if(strlen(Username)==0)
+		if(strlen(g_Username)==0)
 			Method[1]=0x00;
 		else
 			Method[1]=0x02;
@@ -323,10 +314,10 @@ int Authentication(SOCKET s, char *ReceiveBuf)
 		if((PLen!=0)&&(PLen<=256))
 			memcpy(PASS,ReceiveBuf+3+aq->Ulen,PLen);
 
-		if(!strcmp(Username,USER) && !strcmp(Password,PASS))
+		if(!strcmp(g_Username,USER) && !strcmp(g_Password,PASS))
 		{
 			ReceiveBuf[1]=0x00;
-			printf("Socks5 Authentication Passed~\n");
+			//printf("Socks5 Authentication Passed~\n");
 		}
 		else
 		{
@@ -512,9 +503,9 @@ BOOL DoSocks5(SOCKET *CSsocket, char *ReceiveBuf)
 
     Socks5AnsConn SAC;
 	memset(&SAC,0,sizeof(SAC));
-    SAC.Ver=0x05;
+    SAC.Ver =0x05;
     SAC.ATYP=0x01;
-    SAC.REP=0x01;  // 拒绝
+    SAC.REP =0x01;  // 拒绝
 
     IP_PORT IP_Port;
 	int CMD = Get_IP_Port(CSsocket[0], ReceiveBuf, &IP_Port);
@@ -552,7 +543,7 @@ BOOL DoSocks5(SOCKET *CSsocket, char *ReceiveBuf)
         int structsize=sizeof(sockaddr_in);
 		getpeername(CSsocket[0], (struct sockaddr *)&in, &structsize);  //Save the client connection information(client IP and source port)
         sPara.Client.socks=CSsocket[0];
-		sPara.Client.IP_Port.IP = in.sin_addr.s_addr;
+		sPara.Client.IP_Port.IP  = in.sin_addr.s_addr;
 		sPara.Client.IP_Port.Port= in.sin_port;
 		
 		if( CreateUDPSocket(&SAC, &sPara.Local.socks) )
@@ -572,119 +563,8 @@ exit:
     return 0;
 }
 
-DWORD WINAPI ProxyThread(SOCKET* CSsocket)
-{
-    // 申请ReceiveBuf，接收client发来的第一条消息
-    int DataLen;
-	char *ReceiveBuf = (char*)malloc(MAXBUFSIZE);
-    if ( !ReceiveBuf)
-        goto exit;
 
-    memset(ReceiveBuf,0,MAXBUFSIZE);
-    DataLen = recv(CSsocket[0],ReceiveBuf,MAXBUFSIZE,0);
-    if( DataLen == SOCKET_ERROR || DataLen == 0 )
-        goto exit;
-
-
-    // 判断代理类型，1代表是http代理，4是Socks4，5是Socks5，其他不支持直接return。
-    char ProxyType = ReceiveBuf[0];
-    if (ProxyType == 5)
-    {
-        if ( !DoSocks5(CSsocket, ReceiveBuf) )
-            goto exit;
-    }
-    else if (ProxyType == 4)
-    {
-        Socks4Req *Socks4Request = (Socks4Req *)ReceiveBuf;
-        IP_PORT IPP;
-        IPP.Port = Socks4Request->wPort;
-
-        if(ReceiveBuf[4]!=0x00) //USERID !!
-            IPP.IP = Socks4Request->dwIP;
-        else
-        {
-            HOSTENT *hostent = gethostbyname( (char*)&Socks4Request->other+1 );
-            if (hostent == NULL)
-                goto exit;
-
-            IPP.IP = **(PULONG*)hostent->h_addr_list;
-        }
-
-        memset(Socks4Request, 0, 9);
-        CSsocket[1] = ConnectToRemoteIP(&IPP);
-        if( CSsocket[1] )
-            Socks4Request->REP = 0x5A; //GRANT  准许
-        else
-            Socks4Request->REP = 0x5B; //REJECT 拒绝
-
-        if(send(CSsocket[0], (char *)Socks4Request, 8, 0) == SOCKET_ERROR)
-            goto exit;
-
-        if(Socks4Request->REP==0x5B)
-            goto exit;
-    }
-    else
-    {
-        if ( !HttpProxy(CSsocket, ReceiveBuf, DataLen) )
-            goto exit;
-    }
-	
-	if(CSsocket[0] && CSsocket[1])
-		TCPTransfer(CSsocket);
-
-exit:
-    if (CSsocket[1])
-        closesocket(CSsocket[1]);
-	closesocket(CSsocket[0]);
-	free(CSsocket);
-    if (ReceiveBuf)
-	    free(ReceiveBuf);
-	return 0;
-}
-
-BOOL StartProxy()  // done!
-{
-	WSADATA WSAData;
-	if(WSAStartup(MAKEWORD(2,2), &WSAData))
-		return false;
-	
-	SOCKET ProxyServer= socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if(ProxyServer == SOCKET_ERROR)
-		return false;
-	
-	struct sockaddr_in Server={0};
-	
-	Server.sin_family = AF_INET;
-    Server.sin_addr.S_un.S_addr = INADDR_ANY;
-	Server.sin_port = htons(LisPort);
-	
-	if(bind(ProxyServer, (LPSOCKADDR)&Server, sizeof(Server)) == SOCKET_ERROR)
-		return false;
-	
-	if(listen(ProxyServer, DEFLISNUM) == SOCKET_ERROR)
-		return false;
-	
-	SOCKET AcceptSocket = INVALID_SOCKET;
-	SOCKET *CSsocket;
-	DWORD dwThreadID;
-
-	while(1)
-	{
-		AcceptSocket = accept(ProxyServer, NULL, NULL);
-
-		CSsocket = (SOCKET*)malloc(sizeof(SOCKET)*2);
-		if (CSsocket)
-		{
-            CSsocket[0] = AcceptSocket;
-            CSsocket[1] = NULL;
-            HANDLE hThread = CreateThread (NULL,0,(LPTHREAD_START_ROUTINE)ProxyThread,CSsocket,0,&dwThreadID);
-            if (hThread)
-                CloseHandle(hThread);
-        }
-	}
-}
-
-int UDPSend(SOCKET s, char *buff, int nBufSize, struct sockaddr_in *to,int tolen)
+int UDPSend(SOCKET s, char *buff, int nBufSize, struct sockaddr_in *to, int tolen)
 {
 	int nBytesLeft = nBufSize;
 	int idx = 0, nBytes = 0;
@@ -735,7 +615,7 @@ void UDPTransfer(Socks5Para *sPara)
 		FD_ZERO(&readfd);
 		FD_SET((UINT)sPara->Local.socks, &readfd);
 		FD_SET((UINT)sPara->Client.socks, &readfd);
-		result=select(sPara->Local.socks+1,&readfd,NULL,NULL,NULL);
+		result=select((int)sPara->Local.socks+1,&readfd,NULL,NULL,NULL);
 		if((result<0) && (errno!=EINTR))
 		{
 			//printf("Select error.\r\n");
@@ -812,17 +692,23 @@ void UDPTransfer(Socks5Para *sPara)
 
 void TCPTransfer(SOCKET* CSsocket)
 {
+    int result;
 	SOCKET ClientSocket = CSsocket[0];
 	SOCKET ServerSocket = CSsocket[1];
 	struct timeval timeset;
 	fd_set readfd,writefd;
-	int result,i=0;
-	char read_in1[MAXBUFSIZE],send_out1[MAXBUFSIZE],SenderBuf[MAXBUFSIZE];
+	
+    char SenderBuf[MAXBUFSIZE];
+	char read_in1[MAXBUFSIZE],send_out1[MAXBUFSIZE];
 	char read_in2[MAXBUFSIZE],send_out2[MAXBUFSIZE];
+
 	int read1=0,totalread1=0,send1=0;
 	int read2=0,totalread2=0,send2=0;
 	int sendcount1,sendcount2;
+
 	int maxfd = max(ClientSocket,ServerSocket)+1;
+    int i=0;
+
 	memset(read_in1, 0,MAXBUFSIZE);
 	memset(read_in2, 0,MAXBUFSIZE);
 	memset(send_out1,0,MAXBUFSIZE);
@@ -867,7 +753,6 @@ void TCPTransfer(SOCKET* CSsocket)
 
                 totalread2+=read2;
                 memset(read_in2,0,MAXBUFSIZE);
-
             }
         }
 
@@ -957,170 +842,133 @@ void TCPTransfer(SOCKET* CSsocket)
     closesocket(ServerSocket);
 }
 
-
-void WINAPI ServiceCtrlHandler(DWORD Opcode)
+DWORD WINAPI ProxyThread(PVOID s)
 {
-    switch(Opcode)
+    SOCKET CSsocket[2];
+    CSsocket[0] = (SOCKET)s;
+    CSsocket[1] = NULL;
+
+    // 申请ReceiveBuf，接收client发来的第一条消息
+    char *buf = (char*)malloc(MAXBUFSIZE);
+    if ( !buf)
+        goto exit;
+    memset(buf, 0, MAXBUFSIZE);
+
+    int DataLen = recv(CSsocket[0],buf,MAXBUFSIZE,0);
+    if( DataLen == SOCKET_ERROR || DataLen == 0 )
+        goto exit;
+
+    // 判断代理类型，1代表是http代理，4是Socks4，5是Socks5，其他不支持直接return。
+    char ProxyType = buf[0];
+    if (ProxyType == 5)
     {
-    case SERVICE_CONTROL_PAUSE: 
-        g_ServiceStatus.dwCurrentState  = SERVICE_PAUSED;
-        break;
-    case SERVICE_CONTROL_CONTINUE:
-        g_ServiceStatus.dwCurrentState  = SERVICE_RUNNING;
-        break;
-    case SERVICE_CONTROL_STOP:
-        g_ServiceStatus.dwWin32ExitCode = 0;
-        g_ServiceStatus.dwCurrentState  = SERVICE_STOPPED;
-        g_ServiceStatus.dwCheckPoint    = 0;
-        g_ServiceStatus.dwWaitHint      = 0;
-        break;
+        if ( !DoSocks5(CSsocket, buf) )
+            goto exit;
     }
-
-    SetServiceStatus (g_ServiceStatusHandle,&g_ServiceStatus);
-}
-
-void WINAPI ServiceMain(DWORD argc, LPSTR *argv)
-{
-    g_ServiceStatus.dwServiceType      = SERVICE_WIN32;
-    g_ServiceStatus.dwCurrentState     = SERVICE_START_PENDING;
-    g_ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
-    g_ServiceStatus.dwWin32ExitCode    = 0;
-    g_ServiceStatus.dwServiceSpecificExitCode = 0;
-    g_ServiceStatus.dwCheckPoint       = 0;
-    g_ServiceStatus.dwWaitHint         = 0;
-
-    g_ServiceStatusHandle = 
-        RegisterServiceCtrlHandlerA("socks5", ServiceCtrlHandler); 
-    if (g_ServiceStatusHandle)
+    else if (ProxyType == 4)
     {
-        g_ServiceStatus.dwCurrentState = SERVICE_RUNNING;
-        g_ServiceStatus.dwCheckPoint = 0;
-        g_ServiceStatus.dwWaitHint   = 0;
-        SetServiceStatus (g_ServiceStatusHandle, &g_ServiceStatus);
+        Socks4Req *Socks4Request = (Socks4Req *)buf;
+        IP_PORT IPP;
+        IPP.Port = Socks4Request->wPort;
 
-        StartProxy();
-        WSACleanup();
-    }
-}
-
-BOOL InstallService()  // done!
-{
-    BOOL ret = false;
-
-    WCHAR str[MAX_PATH];
-    GetCurrentDirectoryW(MAX_PATH,str);
-    wcscat_s(str,L"\\Socks5.exe");
-
-    SC_HANDLE schSCManager = OpenSCManager(NULL,NULL,SC_MANAGER_ALL_ACCESS);
-    if (schSCManager) 
-    {
-        SC_HANDLE hService = CreateServiceW(schSCManager,
-            L"socks5",            // service name
-            L"socks5",            // display name 
-            SERVICE_ALL_ACCESS,        // desired access 
-            SERVICE_WIN32_OWN_PROCESS, // service type 
-            SERVICE_AUTO_START,        // start type 
-            SERVICE_ERROR_NORMAL,      // error control type 
-            str,  // service's binary 
-            NULL, // no load ordering group 
-            NULL, // no tag identifier 
-            NULL, // no dependencies
-            NULL, // LocalSystem account
-            NULL); // no password
-
-        if (hService)
-        {
-            ret = true;
-            SERVICE_DESCRIPTIONW SD; 
-            SD.lpDescription = L"Socks5代理服务器软件"; 
-            ChangeServiceConfig2W(hService, SERVICE_CONFIG_DESCRIPTION, &SD);
-            CloseServiceHandle(hService);
-        }
-        CloseServiceHandle(schSCManager);
-    }
-
-    return ret;
-}
-
-BOOL DeleteService()  // done!
-{
-    BOOL ret = false;
-
-    SC_HANDLE hSCManager = OpenSCManager(NULL,NULL,SC_MANAGER_ALL_ACCESS);
-    if (hSCManager)
-    {
-        SC_HANDLE hService = OpenServiceA(hSCManager,"socks5",SERVICE_ALL_ACCESS);
-        if (hService)
-        {
-            if(DeleteService(hService))
-                ret = true;
-            CloseServiceHandle(hService);
-        }
-        CloseServiceHandle(hSCManager);
-    }
-
-    return ret;
-}
-
-int main(int argc, char* argv[])
-{
-	if(argc>1)
-	{
-		if(strcmp(argv[1],"-i")==0)
-		{
-			if(InstallService())
-				printf("\nSocks5 Service Install Sucessfully~\n");
-			else
-				printf("\nSocks5 Service Install Error!\n");
-            goto L_Exit;
-		}
-        
-        if(strcmp(argv[1],"-u")==0)
-		{
-			if(DeleteService())
-				printf("\nSocks5 Service UnInstall Sucessfully~\n");
-			else
-				printf("\nSocks5 Service UnInstall Error!\n");
-            goto L_Exit;
-		}
-	}
-
-//     SERVICE_TABLE_ENTRYA DispatchTable[]=
-//     {
-//         {"socks5",ServiceMain},
-//         {NULL,NULL}
-//     };
-//     StartServiceCtrlDispatcherA(DispatchTable);
-
-    if (!g_ServiceStatusHandle)
-    {
-        printf("SOCKS4 & SOCKS5 & Http Proxy V1.0\n");
-
-        if(argc>2)
-        {
-            if(strcmp(argv[1],"-p")==0)
-            {
-                LisPort=atoi(argv[2]);
-                printf(" ProxyPort %d\n", LisPort);
-
-                if(argc==5)
-                {
-                    strcpy_s(Username,argv[3]);
-                    strcpy_s(Password,argv[4]);
-
-                    printf("Username %s Password %s\n", Username, Password);
-                }
-            }
-        }
+        if(buf[4]!=0x00) //USERID !!
+            IPP.IP = Socks4Request->dwIP;
         else
         {
-            printf(" ~ ProxyPort = %d\n", LisPort);
+            HOSTENT *hostent = gethostbyname( (char*)&Socks4Request->other+1 );
+            if (hostent == NULL)
+                goto exit;
+
+            IPP.IP = **(PULONG*)hostent->h_addr_list;
         }
 
-        StartProxy();
-        WSACleanup();
+        memset(Socks4Request, 0, 9);
+        CSsocket[1] = ConnectToRemoteIP(&IPP);
+        if( CSsocket[1] )
+            Socks4Request->REP = 0x5A; //GRANT  准许
+        else
+            Socks4Request->REP = 0x5B; //REJECT 拒绝
+
+        if(send(CSsocket[0], (char *)Socks4Request, 8, 0) == SOCKET_ERROR)
+            goto exit;
+
+        if(Socks4Request->REP==0x5B)
+            goto exit;
+    }
+    else
+    {
+        if ( !HttpProxy(CSsocket, buf, DataLen) )
+            goto exit;
     }
 
-L_Exit:
+    if(CSsocket[0] && CSsocket[1])
+        TCPTransfer(CSsocket);
+
+exit:
+    if (CSsocket[1])
+        closesocket(CSsocket[1]);
+    if (CSsocket[0])
+        closesocket(CSsocket[0]);
+    if (buf)
+        free(buf);
+    return 0;
+}
+
+void StartProxy(u_short LisPort)  // done!
+{
+    WSADATA WSAData;
+    if(WSAStartup(MAKEWORD(2,2), &WSAData))
+        return;
+
+    SOCKET ProxyServer= socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if(ProxyServer == SOCKET_ERROR)
+        return;
+
+    struct sockaddr_in Server={0};
+
+    Server.sin_family = AF_INET;
+    Server.sin_addr.S_un.S_addr = INADDR_ANY;
+    Server.sin_port = htons(LisPort);
+
+    if(bind(ProxyServer, (LPSOCKADDR)&Server, sizeof(Server)) == SOCKET_ERROR)
+        return;
+
+    if(listen(ProxyServer, SOMAXCONN) == SOCKET_ERROR)
+        return;
+
+    while(1)
+    { 
+        SOCKET s = accept(ProxyServer, NULL, NULL);
+        DWORD dwThreadID;
+        HANDLE hThread = CreateThread (NULL,0,(LPTHREAD_START_ROUTINE)ProxyThread,(PVOID)s,0,&dwThreadID);
+        if (hThread)
+            CloseHandle(hThread);
+    }
+
+    closesocket(ProxyServer);
+    WSACleanup();
+}
+
+int main(int argc, char* argv[])  // done!
+{
+    u_short LisPort = 10086;
+
+    printf("SOCKS4 & SOCKS5 & Http Proxy V1.0\n");
+
+    if(argc>=2)
+    {
+        LisPort=atoi(argv[1]);
+
+        if(argc==4)
+        {
+            strcpy_s(g_Username, sizeof(g_Username), argv[2]);
+            strcpy_s(g_Password, sizeof(g_Password), argv[3]);
+
+            printf("Username : %s, Password : %s\n", g_Username, g_Password);
+        }
+    }
+
+    printf(" ~ ProxyPort = %d\n", LisPort);
+    StartProxy(LisPort);
 	return 0;
 }
