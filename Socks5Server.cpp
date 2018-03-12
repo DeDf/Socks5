@@ -15,6 +15,8 @@
 #define TIMEOUT      10000
 #define HEADLEN      7
 
+#define _OUT_
+
 char HTTP_200_OK[]="HTTP/1.0 200 OK\r\n\r\n";
 
 char g_Username[256];
@@ -341,33 +343,30 @@ ULONG DNS(char *HostName)
 	return **(PULONG*)hostent->h_addr_list;
 }
 
-int GetAddressAndPort(char *ReceiveBuf, int DataLen, int ATYP, char *HostName, WORD *RemotePort)
+int GetAddressAndPort(char *ReceiveBuf, int DataLen, char *HostName, ULONG *pIp, WORD *RemotePort)  // done!
 {
 	Socks5Info *Socks5Request=(Socks5Info *)ReceiveBuf;
-	struct sockaddr_in in;
 	
 	if( (Socks5Request->Ver==0)&&(Socks5Request->CMD==0) )
     {
-        if (ATYP==1)
+        if (Socks5Request->ATYP==1)       // IPv4
         {
             IP_PORT *IPP=(IP_PORT *)&Socks5Request->IP_LEN;
-            in.sin_addr.S_un.S_addr = IPP->IP;
-            memcpy(HostName, inet_ntoa(in.sin_addr),strlen(inet_ntoa(in.sin_addr)));
-            *RemotePort = ntohs(IPP->Port);
+            *pIp = IPP->IP;
+            *RemotePort = IPP->Port;
             return 10;                       //return Data Enter point
         }
-        else if (ATYP==3)
+        else if (Socks5Request->ATYP==3)  // 域名
         {
             memcpy(HostName, &Socks5Request->szIP, Socks5Request->IP_LEN);
             memcpy(RemotePort, &Socks5Request->szIP+Socks5Request->IP_LEN, 2);
-            *RemotePort=ntohs(*RemotePort);
-            return 7+Socks5Request->IP_LEN;  //return Data Enter point
+            return 7 + Socks5Request->IP_LEN;  //return Data Enter point
         }
+
+        return 1;
     }
-    else
-		return 0;
-	
-	return 1;
+
+	return 0;
 }
 
 SOCKET ConnectToRemoteIP(IP_PORT *pIPP)
@@ -465,10 +464,10 @@ int Get_IP_Port(SOCKET s, char *ReceiveBuf, IP_PORT *IPP)
     return 0;
 }
 
-BOOL CreateUDPSocket(Socks5AnsConn *SAC, SOCKET *socks)
+BOOL CreateUDPSocket(_OUT_ Socks5AnsConn *SAC, _OUT_ SOCKET *p_sock)  // done!
 {
-    SOCKET Locals = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if(Locals == SOCKET_ERROR)
+    *p_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if(*p_sock == SOCKET_ERROR)
         return 0;
 
     struct sockaddr_in UDPServer;
@@ -476,22 +475,18 @@ BOOL CreateUDPSocket(Socks5AnsConn *SAC, SOCKET *socks)
     UDPServer.sin_addr.s_addr=INADDR_ANY;
     UDPServer.sin_port=INADDR_ANY;
 
-    if(bind(Locals,(SOCKADDR*)&UDPServer, sizeof(UDPServer)) == SOCKET_ERROR)
+    if(bind(*p_sock, (SOCKADDR*)&UDPServer, sizeof(UDPServer)) == SOCKET_ERROR)
     {
         printf("UDP socket bind failed.\n");
         return 0;
     }
 
-    //UINT TimeOut = TIMEOUT;
-    //setsockopt(Locals,SOL_SOCKET,SO_RCVTIMEO,(char *)&TimeOut,sizeof(TimeOut));
-    *socks = Locals;
-
-    struct sockaddr_in in;
-    memset(&in,0,sizeof(sockaddr_in));
-    int structsize=sizeof(sockaddr_in);
-    getsockname(Locals, (struct sockaddr *)&in, &structsize);
-    SAC->IP_PORT.IP  = in.sin_addr.s_addr;
-    SAC->IP_PORT.Port = in.sin_port;
+    struct sockaddr_in addr;
+    memset(&addr,0,sizeof(sockaddr_in));
+    int AddrLen=sizeof(sockaddr_in);
+    getsockname(*p_sock, (struct sockaddr *)&addr, &AddrLen);
+    SAC->IP_PORT.IP   = addr.sin_addr.s_addr;
+    SAC->IP_PORT.Port = addr.sin_port;
 
     return 1;
 }
@@ -549,10 +544,10 @@ BOOL DoSocks5(SOCKET *CSsocket, char *ReceiveBuf)
 		if( CreateUDPSocket(&SAC, &sPara.Local.socks) )
 			SAC.REP=0x00;
 
-		if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
-			goto exit;
+        if(SAC.REP==0x01)
+            goto exit;
 
-		if(SAC.REP==0x01)
+		if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
 			goto exit;
 		
 		sPara.Local.IP_Port = SAC.IP_PORT;
@@ -563,57 +558,46 @@ exit:
     return 0;
 }
 
-
-int UDPSend(SOCKET s, char *buff, int nBufSize, struct sockaddr_in *to, int tolen)
+int UDPSend(SOCKET s, char *buf, int nBufSize, struct sockaddr_in *to, int tolen)  // done!
 {
 	int nBytesLeft = nBufSize;
-	int idx = 0, nBytes = 0;
+	int nBytes = 0;
+
 	while(nBytesLeft > 0)
 	{
-		nBytes = sendto(s, &buff[idx], nBytesLeft, 0, (SOCKADDR *)to, tolen);
+		nBytes = sendto(s, &buf[nBufSize - nBytesLeft], nBytesLeft, 0, (SOCKADDR *)to, tolen);
 		if(nBytes == SOCKET_ERROR)
 		{
 			//printf("Failed to send buffer to socket %d.\r\n", WSAGetLastError());
 			return SOCKET_ERROR;
 		}
 		nBytesLeft -= nBytes;
-		idx += nBytes;
 	}
-	return idx;
+
+	return nBufSize - nBytesLeft;
 }
 
 void UDPTransfer(Socks5Para *sPara)
 {
-    int result;
+    int    result;
 	struct sockaddr_in SenderAddr;
-	int   SenderAddrSize=sizeof(SenderAddr),DataLength=0;
-	char RecvBuf[MAXBUFSIZE];
+	int    SenderAddrSize = sizeof(SenderAddr);
+	char   RecvBuf[MAXBUFSIZE];
 	
-	struct sockaddr_in UDPClient,UDPServer;
+	struct sockaddr_in UDPClient, UDPServer;
 	memset(&UDPClient,0,sizeof(sockaddr_in));
 	memset(&UDPServer,0,sizeof(sockaddr_in));
 	
 	UDPClient.sin_family = AF_INET;
 	UDPClient.sin_addr.s_addr = sPara->Client.IP_Port.IP;
 	UDPClient.sin_port = sPara->Client.IP_Port.Port;
-
-	/*/test
-	Socks5UDPHead test;
-	memset(&test,0,sizeof(Socks5UDPHead));
-	test.RSV[0]=0x05;
-	test.ATYP=0x01;
-	test.IPandPort=sPara->Local.IPandPort;
-	if(sendto(sPara->Local.socks,(char*)&test, 10,0,(struct sockaddr FAR *)&UDPClient,sizeof(UDPClient)) == SOCKET_ERROR)
-	{
-	//printf("test sendto server error.\n");
-	return;
-}*/
 	
 	fd_set readfd;
+    int DataLength=0;
 	while(1)
 	{
 		FD_ZERO(&readfd);
-		FD_SET((UINT)sPara->Local.socks, &readfd);
+		FD_SET((UINT)sPara->Local.socks,  &readfd);
 		FD_SET((UINT)sPara->Client.socks, &readfd);
 		result=select((int)sPara->Local.socks+1,&readfd,NULL,NULL,NULL);
 		if((result<0) && (errno!=EINTR))
@@ -623,7 +607,7 @@ void UDPTransfer(Socks5Para *sPara)
 		}
 		if(FD_ISSET(sPara->Client.socks, &readfd))
 			break;
-		if(FD_ISSET(sPara->Local.socks, &readfd))
+		if(FD_ISSET(sPara->Local.socks,  &readfd))
 		{
 			memset(RecvBuf,0,MAXBUFSIZE);
 			DataLength=recvfrom(sPara->Local.socks,
@@ -632,60 +616,62 @@ void UDPTransfer(Socks5Para *sPara)
 			{
 				//printf("UDPTransfer recvfrom error.\n");
 				break;
-			}//SenderAddr.sin_addr.s_addr==sPara->Client.IPandPort.dwIP&&
-			if(SenderAddr.sin_port==sPara->Client.IP_Port.Port)//Data come from client
+			}
+			if(SenderAddr.sin_addr.s_addr==sPara->Client.IP_Port.IP &&
+               SenderAddr.sin_port       ==sPara->Client.IP_Port.Port) //Data come from client
 			{
 				//////这里要先修改udp数据报头
 				WORD RemotePort = 0;
-				char HostName[MAX_HOSTNAME];
-				memset(HostName,0,MAX_HOSTNAME);
-				int DataPoint=GetAddressAndPort(RecvBuf+10, DataLength, RecvBuf[13], HostName, &RemotePort);
-				if(DataPoint)
+                char HostName[MAX_HOSTNAME] = {0};
+                ULONG ip = 0;
+
+				int DataOffset=GetAddressAndPort(RecvBuf+10, DataLength, HostName, &ip, &RemotePort);
+				if(DataOffset)
 				{
-					////printf("Data come from client IP: %s:%d | %d Bytes.\n",
+					// printf("Data come from client IP: %s:%d | %d Bytes.\n",
 					// inet_ntoa(SenderAddr.sin_addr),ntohs(SenderAddr.sin_port),DataLength);
 					//send data to server
-					////printf("IP: %s:%d || DataPoint: %d\n",HostName,RemotePort,DataPoint);
+					// printf("IP: %s:%d || DataPoint: %d\n",HostName,RemotePort,DataPoint);
 					
 					UDPServer.sin_family=AF_INET;
-					UDPServer.sin_addr.s_addr= DNS(HostName);
-					UDPServer.sin_port=htons(RemotePort);
+                    if (ip)
+                        UDPServer.sin_addr.s_addr= ip;
+                    else
+					    UDPServer.sin_addr.s_addr= DNS(HostName);
+					UDPServer.sin_port=RemotePort;
 					
-					result=UDPSend(sPara->Local.socks,RecvBuf+10+DataPoint, DataLength-DataPoint,&UDPServer,sizeof(UDPServer));
+					result=UDPSend(sPara->Local.socks,RecvBuf+10+DataOffset,DataLength-DataOffset,&UDPServer,sizeof(UDPServer));
 					if(result == SOCKET_ERROR)
 					{
 						//printf("sendto server error\n");
 						break;
 					}
-					printf("Data(%d) sent to server succeed.|| Bytes: %d\n",DataLength-DataPoint,result);
-				}else break;
-			}else if(SenderAddr.sin_port==UDPServer.sin_port)//Data come from server
-			{//SenderAddr.sin_addr.s_addr==UDPServer.sin_addr.s_addr&&
+					//printf("Data(%d) sent to server succeed.|| Bytes: %d\n",DataLength-DataOffset,result);
+				} else break;
+			}
+            else if(SenderAddr.sin_addr.s_addr==UDPServer.sin_addr.s_addr &&
+                    SenderAddr.sin_port       ==UDPServer.sin_port)  //Data come from server
+			{
 				//send data to client
-				////printf("Data come from server IP: %s:%d | %d Bytes.\n",
+				// printf("Data come from server IP: %s:%d | %d Bytes.\n",
 				// inet_ntoa(SenderAddr.sin_addr),ntohs(SenderAddr.sin_port),DataLength);
 				Socks5UDPHead *UDPHead = (Socks5UDPHead*)RecvBuf;
 				memset(UDPHead,0,10);
 				UDPHead->ATYP=0x01;
 				UDPHead->IP_PORT=sPara->Client.IP_Port;
-				//UDPHead->IPandPort.dwIP =SenderAddr.sin_addr.s_addr;
-				//UDPHead->IPandPort.wPort=SenderAddr.sin_port;
-				//memcpy(&UDPHead->DATA-2,RecvBuf,DataLength);//UDPHead->DATA-2!!!!!!!!!!!!
 				
 				result=UDPSend(sPara->Local.socks,RecvBuf,DataLength+10,&UDPClient,sizeof(UDPClient));
 				if(result == SOCKET_ERROR)
 				{
-					////printf("sendto client error\n");
+					//printf("sendto client error\n");
 					break;
 				}
 				//printf("Data(%d) sent to client succeed.|| Bytes: %d\n",DataLength+10,result);
-			}else
-			{
-				//printf("!!!!!The data are not from client or server.drop it.%s\n",inet_ntoa(SenderAddr.sin_addr));
 			}
 		}
 		Sleep(5);
 	}
+
 	closesocket(sPara->Local.socks);
 	closesocket(sPara->Client.socks);
 }
@@ -842,19 +828,16 @@ void TCPTransfer(SOCKET* CSsocket)
     closesocket(ServerSocket);
 }
 
-DWORD WINAPI ProxyThread(PVOID s)
+DWORD WINAPI ProxyThread(PVOID sClient)
 {
     SOCKET CSsocket[2];
-    CSsocket[0] = (SOCKET)s;
+    CSsocket[0] = (SOCKET)sClient;
     CSsocket[1] = NULL;
 
-    // 申请ReceiveBuf，接收client发来的第一条消息
-    char *buf = (char*)malloc(MAXBUFSIZE);
-    if ( !buf)
-        goto exit;
-    memset(buf, 0, MAXBUFSIZE);
+    char buf[1024];
+    memset(buf, 0, sizeof(buf));
 
-    int DataLen = recv(CSsocket[0],buf,MAXBUFSIZE,0);
+    int DataLen = recv(CSsocket[0],buf,sizeof(buf),0);
     if( DataLen == SOCKET_ERROR || DataLen == 0 )
         goto exit;
 
@@ -909,8 +892,7 @@ exit:
         closesocket(CSsocket[1]);
     if (CSsocket[0])
         closesocket(CSsocket[0]);
-    if (buf)
-        free(buf);
+
     return 0;
 }
 
@@ -920,8 +902,8 @@ void StartProxy(u_short LisPort)  // done!
     if(WSAStartup(MAKEWORD(2,2), &WSAData))
         return;
 
-    SOCKET ProxyServer= socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if(ProxyServer == SOCKET_ERROR)
+    SOCKET sProxy = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if(sProxy == SOCKET_ERROR)
         return;
 
     struct sockaddr_in Server={0};
@@ -930,22 +912,21 @@ void StartProxy(u_short LisPort)  // done!
     Server.sin_addr.S_un.S_addr = INADDR_ANY;
     Server.sin_port = htons(LisPort);
 
-    if(bind(ProxyServer, (LPSOCKADDR)&Server, sizeof(Server)) == SOCKET_ERROR)
+    if(bind(sProxy, (LPSOCKADDR)&Server, sizeof(Server)) == SOCKET_ERROR)
         return;
 
-    if(listen(ProxyServer, SOMAXCONN) == SOCKET_ERROR)
+    if(listen(sProxy, SOMAXCONN) == SOCKET_ERROR)
         return;
 
     while(1)
     { 
-        SOCKET s = accept(ProxyServer, NULL, NULL);
-        DWORD dwThreadID;
-        HANDLE hThread = CreateThread (NULL,0,(LPTHREAD_START_ROUTINE)ProxyThread,(PVOID)s,0,&dwThreadID);
+        SOCKET sClient = accept(sProxy, NULL, NULL);
+        HANDLE hThread = CreateThread (NULL,0,(LPTHREAD_START_ROUTINE)ProxyThread,(PVOID)sClient,0,NULL);
         if (hThread)
             CloseHandle(hThread);
     }
 
-    closesocket(ProxyServer);
+    closesocket(sProxy);
     WSACleanup();
 }
 
@@ -953,7 +934,11 @@ int main(int argc, char* argv[])  // done!
 {
     u_short LisPort = 10086;
 
-    printf("SOCKS4 & SOCKS5 & Http Proxy V1.0\n");
+    printf("SOCKS4 & SOCKS5 & Http Proxy V1.0\n"
+           "  usage:\n"
+           "    双击 - 直接启动，默认端口10086\n"
+           "    Socks5 [port] [UserName] [PassWord]\n\n"
+        );
 
     if(argc>=2)
     {
@@ -964,7 +949,7 @@ int main(int argc, char* argv[])  // done!
             strcpy_s(g_Username, sizeof(g_Username), argv[2]);
             strcpy_s(g_Password, sizeof(g_Password), argv[3]);
 
-            printf("Username : %s, Password : %s\n", g_Username, g_Password);
+            printf(" ~ Username : %s, Password : %s\n", g_Username, g_Password);
         }
     }
 
