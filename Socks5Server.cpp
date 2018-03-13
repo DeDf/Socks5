@@ -68,7 +68,7 @@ typedef struct
 	BYTE RSV;
 	BYTE ATYP;
 	IP_PORT IP_PORT;
-}Socks5AnsConn;
+}Socks5Reply;
 
 typedef struct
 {
@@ -90,11 +90,11 @@ typedef struct
 	SocketInfo Local;
 	SocketInfo Client;
 	SocketInfo Server;
-}Socks5Para;
+}Socks5UDP;
 // End Of Structure
 
 void TCPTransfer(SOCKET* CSsocket);
-void UDPTransfer(Socks5Para *sPara);
+void UDPTransfer(Socks5UDP *sPara);
 BOOL ConnectToRemoteHost(SOCKET *ServerSocket,char *HostName,const WORD RemotePort);
 
 //functions
@@ -290,9 +290,14 @@ int Authentication(SOCKET s, char *ReceiveBuf)
 			Method[1]=0x02;
 
 		if(send(s,Method,2,0) == SOCKET_ERROR)
+        {
 			return 0;
-	}else
+        }
+	}
+    else
+    {
 		return 0;
+    }
 
 	if(Method[1]==0x02)
 	{
@@ -301,13 +306,17 @@ int Authentication(SOCKET s, char *ReceiveBuf)
 		memset(USER,0,sizeof(USER));
 		memset(PASS,0,sizeof(PASS));
 
-		int DataLen = recv(s,ReceiveBuf,MAXBUFSIZE,0);
+		int DataLen = recv(s,ReceiveBuf,1024,0);
 		if(DataLen == SOCKET_ERROR || DataLen == 0)
+        {
 			return 0;
+        }
 
 		AuthReq *aq=(AuthReq *)ReceiveBuf;
 		if(aq->Ver!=1)
-			return 0;
+        {
+            return 0;
+        }
 
 		if((aq->Ulen!=0)&&(aq->Ulen<=256))
 			memcpy(USER,ReceiveBuf+2,aq->Ulen);
@@ -328,7 +337,9 @@ int Authentication(SOCKET s, char *ReceiveBuf)
 		}
 
 		if(send(s,ReceiveBuf,2,0) == SOCKET_ERROR)
-			return 0;
+        {
+            return 0;
+        }
 	}
 	
 	return 1;
@@ -427,7 +438,7 @@ BOOL ConnectToRemoteHost(SOCKET *ServerSocket,char *HostName,const WORD RemotePo
 
 int Get_IP_Port(SOCKET s, char *ReceiveBuf, IP_PORT *IPP)
 {
-    int DataLen = recv(s,ReceiveBuf,MAXBUFSIZE,0);
+    int DataLen = recv(s,ReceiveBuf,1024,0);
     if(DataLen == SOCKET_ERROR || DataLen == 0)
         return 0;
 
@@ -464,7 +475,7 @@ int Get_IP_Port(SOCKET s, char *ReceiveBuf, IP_PORT *IPP)
     return 0;
 }
 
-BOOL CreateUDPSocket(_OUT_ Socks5AnsConn *SAC, _OUT_ SOCKET *p_sock)  // done!
+BOOL CreateUDPSocket(_OUT_ Socks5Reply *SAC, _OUT_ SOCKET *p_sock)  // done!
 {
     *p_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if(*p_sock == SOCKET_ERROR)
@@ -496,11 +507,11 @@ BOOL DoSocks5(SOCKET *CSsocket, char *ReceiveBuf)
     if ( !Authentication(CSsocket[0], ReceiveBuf) )
         goto exit;
 
-    Socks5AnsConn SAC;
-	memset(&SAC,0,sizeof(SAC));
+    Socks5Reply SAC;
     SAC.Ver =0x05;
-    SAC.ATYP=0x01;
     SAC.REP =0x01;  // 拒绝
+    SAC.RSV =0x00;
+    SAC.ATYP=0x01;
 
     IP_PORT IP_Port;
 	int CMD = Get_IP_Port(CSsocket[0], ReceiveBuf, &IP_Port);
@@ -530,18 +541,18 @@ BOOL DoSocks5(SOCKET *CSsocket, char *ReceiveBuf)
 	}
 	else if(CMD==3) //UDP ASSOCIATE
 	{
-        Socks5Para sPara;
-        memset(&sPara,0,sizeof(Socks5Para));
+        Socks5UDP S5UDP;
+        memset(&S5UDP,0,sizeof(Socks5UDP));
 
         struct sockaddr_in in;
         memset(&in,0,sizeof(sockaddr_in));
         int structsize=sizeof(sockaddr_in);
 		getpeername(CSsocket[0], (struct sockaddr *)&in, &structsize);  //Save the client connection information(client IP and source port)
-        sPara.Client.socks=CSsocket[0];
-		sPara.Client.IP_Port.IP  = in.sin_addr.s_addr;
-		sPara.Client.IP_Port.Port= in.sin_port;
+        S5UDP.Client.socks=CSsocket[0];
+		S5UDP.Client.IP_Port.IP   = in.sin_addr.s_addr;
+		S5UDP.Client.IP_Port.Port = in.sin_port;
 		
-		if( CreateUDPSocket(&SAC, &sPara.Local.socks) )
+		if( CreateUDPSocket(&SAC, &S5UDP.Local.socks) )
 			SAC.REP=0x00;
 
         if(SAC.REP==0x01)
@@ -550,8 +561,8 @@ BOOL DoSocks5(SOCKET *CSsocket, char *ReceiveBuf)
 		if(send(CSsocket[0], (char *)&SAC, 10, 0) == SOCKET_ERROR)
 			goto exit;
 		
-		sPara.Local.IP_Port = SAC.IP_PORT;
-		UDPTransfer(&sPara);
+		S5UDP.Local.IP_Port = SAC.IP_PORT;
+		UDPTransfer(&S5UDP);
 	}
 
 exit:
@@ -577,7 +588,7 @@ int UDPSend(SOCKET s, char *buf, int nBufSize, struct sockaddr_in *to, int tolen
 	return nBufSize - nBytesLeft;
 }
 
-void UDPTransfer(Socks5Para *sPara)
+void UDPTransfer(Socks5UDP *pS5UDP)
 {
     int    result;
 	struct sockaddr_in SenderAddr;
@@ -589,50 +600,44 @@ void UDPTransfer(Socks5Para *sPara)
 	memset(&UDPServer,0,sizeof(sockaddr_in));
 	
 	UDPClient.sin_family = AF_INET;
-	UDPClient.sin_addr.s_addr = sPara->Client.IP_Port.IP;
-	UDPClient.sin_port = sPara->Client.IP_Port.Port;
+	UDPClient.sin_addr.s_addr = pS5UDP->Client.IP_Port.IP;
 	
 	fd_set readfd;
     int DataLength=0;
 	while(1)
 	{
 		FD_ZERO(&readfd);
-		FD_SET((UINT)sPara->Local.socks,  &readfd);
-		FD_SET((UINT)sPara->Client.socks, &readfd);
-		result=select((int)sPara->Local.socks+1,&readfd,NULL,NULL,NULL);
+		FD_SET((UINT)pS5UDP->Local.socks,  &readfd);
+		FD_SET((UINT)pS5UDP->Client.socks, &readfd);
+		result=select((int)pS5UDP->Local.socks+1,&readfd,NULL,NULL,NULL);
 		if((result<0) && (errno!=EINTR))
 		{
 			//printf("Select error.\r\n");
 			break;
 		}
-		if(FD_ISSET(sPara->Client.socks, &readfd))
+		if(FD_ISSET(pS5UDP->Client.socks, &readfd))
 			break;
-		if(FD_ISSET(sPara->Local.socks,  &readfd))
+		if(FD_ISSET(pS5UDP->Local.socks,  &readfd))
 		{
 			memset(RecvBuf,0,MAXBUFSIZE);
-			DataLength=recvfrom(sPara->Local.socks,
+			DataLength=recvfrom(pS5UDP->Local.socks,
 				RecvBuf+10, MAXBUFSIZE-10, 0, (struct sockaddr FAR *)&SenderAddr, &SenderAddrSize);
 			if(DataLength==SOCKET_ERROR)
 			{
 				//printf("UDPTransfer recvfrom error.\n");
 				break;
 			}
-			if(SenderAddr.sin_addr.s_addr==sPara->Client.IP_Port.IP &&
-               SenderAddr.sin_port       ==sPara->Client.IP_Port.Port) //Data come from client
+
+			if(SenderAddr.sin_addr.s_addr==pS5UDP->Client.IP_Port.IP) //Data come from client
 			{
-				//////这里要先修改udp数据报头
-				WORD RemotePort = 0;
+				// // send data to UDP server
                 char HostName[MAX_HOSTNAME] = {0};
                 ULONG ip = 0;
+                WORD RemotePort = 0;
 
 				int DataOffset=GetAddressAndPort(RecvBuf+10, DataLength, HostName, &ip, &RemotePort);
 				if(DataOffset)
 				{
-					// printf("Data come from client IP: %s:%d | %d Bytes.\n",
-					// inet_ntoa(SenderAddr.sin_addr),ntohs(SenderAddr.sin_port),DataLength);
-					//send data to server
-					// printf("IP: %s:%d || DataPoint: %d\n",HostName,RemotePort,DataPoint);
-					
 					UDPServer.sin_family=AF_INET;
                     if (ip)
                         UDPServer.sin_addr.s_addr= ip;
@@ -640,27 +645,27 @@ void UDPTransfer(Socks5Para *sPara)
 					    UDPServer.sin_addr.s_addr= DNS(HostName);
 					UDPServer.sin_port=RemotePort;
 					
-					result=UDPSend(sPara->Local.socks,RecvBuf+10+DataOffset,DataLength-DataOffset,&UDPServer,sizeof(UDPServer));
+					result=UDPSend(pS5UDP->Local.socks,RecvBuf+10+DataOffset,DataLength-DataOffset,&UDPServer,sizeof(UDPServer));
 					if(result == SOCKET_ERROR)
 					{
 						//printf("sendto server error\n");
 						break;
 					}
+                    UDPClient.sin_port = SenderAddr.sin_port;
 					//printf("Data(%d) sent to server succeed.|| Bytes: %d\n",DataLength-DataOffset,result);
 				} else break;
 			}
             else if(SenderAddr.sin_addr.s_addr==UDPServer.sin_addr.s_addr &&
                     SenderAddr.sin_port       ==UDPServer.sin_port)  //Data come from server
 			{
-				//send data to client
-				// printf("Data come from server IP: %s:%d | %d Bytes.\n",
-				// inet_ntoa(SenderAddr.sin_addr),ntohs(SenderAddr.sin_port),DataLength);
+				// send data to client
 				Socks5UDPHead *UDPHead = (Socks5UDPHead*)RecvBuf;
 				memset(UDPHead,0,10);
 				UDPHead->ATYP=0x01;
-				UDPHead->IP_PORT=sPara->Client.IP_Port;
+				UDPHead->IP_PORT.IP  =SenderAddr.sin_addr.s_addr;
+                UDPHead->IP_PORT.Port=SenderAddr.sin_port;
 				
-				result=UDPSend(sPara->Local.socks,RecvBuf,DataLength+10,&UDPClient,sizeof(UDPClient));
+				result=UDPSend(pS5UDP->Local.socks,RecvBuf,DataLength+10,&UDPClient,sizeof(UDPClient));
 				if(result == SOCKET_ERROR)
 				{
 					//printf("sendto client error\n");
@@ -672,8 +677,8 @@ void UDPTransfer(Socks5Para *sPara)
 		Sleep(5);
 	}
 
-	closesocket(sPara->Local.socks);
-	closesocket(sPara->Client.socks);
+	closesocket(pS5UDP->Local.socks);
+	closesocket(pS5UDP->Client.socks);
 }
 
 void TCPTransfer(SOCKET* CSsocket)
