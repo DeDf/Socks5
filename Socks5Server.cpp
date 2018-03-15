@@ -398,7 +398,9 @@ SOCKET ConnectToRemoteIP(IP_PORT *pIPP)
 	setsockopt(ServerSocket,SOL_SOCKET,SO_RCVTIMEO,(char *)&TimeOut,sizeof(TimeOut));
 	if (connect(ServerSocket, (const SOCKADDR *)&Server,sizeof(Server)) == SOCKET_ERROR)
 	{
-		printf("Fail To Connect To Remote Host\n");
+        UCHAR *p = (UCHAR *)&pIPP->IP;
+        printf("Fail To Connect To Remote Host : %d.%d.%d.%d:%d\n",
+            p[0], p[1], p[2], p[3], ntohs(pIPP->Port));
 		closesocket(ServerSocket);
         return NULL;
 	}
