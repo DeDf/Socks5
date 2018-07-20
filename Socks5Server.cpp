@@ -130,7 +130,7 @@ char * GetURLRootPoint(char * ReceiveBuf,int DataLen,int *HostNaneLen)
 }
 //---------------------------------------------------------------------------
 // 检查从client收到的请求buf，看是否为http请求
-int CheckHttpRequest(const char *ReceiveBuf, int *MethodLength)  // done!
+int CheckHttpRequest(const char *ReceiveBuf, int *MethodLength)
 {
 	if(!_strnicmp(ReceiveBuf,"GET ",4))
 	{
@@ -276,20 +276,20 @@ BOOL SendRequest(SOCKET* CSsocket, char *SenderBuf, char *ReceiveBuf, int DataLe
 	return 1;
 }
 
-int Authentication(SOCKET s, char *ReceiveBuf)
+int Authentication(SOCKET s, char *buf)  // done!
 {
-	Socks5Req *sq = (Socks5Req *)ReceiveBuf;
+	Socks5Req *sq = (Socks5Req *)buf;
 
-    char Method[2]={0x05,0};
+    char SendBuf[2]={5, 0};
 
-	if((sq->Methods[0]==0)||(sq->Methods[0]==2))//00，无需认证；01，GSSAPI；02，需要用户名和PASSWORD
+	if((sq->Methods[0]==0)||(sq->Methods[0]==2))  // 0 : 无需认证；1 : GSSAPI；2 : 需要用户名和PASSWORD
 	{
 		if(strlen(g_Username)==0)
-			Method[1]=0x00;
+			SendBuf[1]=0x00;
 		else
-			Method[1]=0x02;
+			SendBuf[1]=0x02;
 
-		if(send(s,Method,2,0) == SOCKET_ERROR)
+		if(send(s,SendBuf,2,0) == SOCKET_ERROR)
         {
 			return 0;
         }
@@ -299,44 +299,44 @@ int Authentication(SOCKET s, char *ReceiveBuf)
 		return 0;
     }
 
-	if(Method[1]==0x02)
+	if(SendBuf[1]==2)
 	{
 		char USER[256];
 		char PASS[256];
 		memset(USER,0,sizeof(USER));
 		memset(PASS,0,sizeof(PASS));
 
-		int DataLen = recv(s,ReceiveBuf,1024,0);
+		int DataLen = recv(s,buf,1024,0);
 		if(DataLen == SOCKET_ERROR || DataLen == 0)
         {
 			return 0;
         }
 
-		AuthReq *aq=(AuthReq *)ReceiveBuf;
+		AuthReq *aq=(AuthReq *)buf;
 		if(aq->Ver!=1)
         {
             return 0;
         }
 
 		if((aq->Ulen!=0)&&(aq->Ulen<=256))
-			memcpy(USER,ReceiveBuf+2,aq->Ulen);
+			memcpy(USER,buf+2,aq->Ulen);
 
-		int PLen=ReceiveBuf[2+aq->Ulen];
+		int PLen=buf[2+aq->Ulen];
 		if((PLen!=0)&&(PLen<=256))
-			memcpy(PASS,ReceiveBuf+3+aq->Ulen,PLen);
+			memcpy(PASS,buf+3+aq->Ulen,PLen);
 
 		if(!strcmp(g_Username,USER) && !strcmp(g_Password,PASS))
 		{
-			ReceiveBuf[1]=0x00;
+			buf[1]=0;
 			//printf("Socks5 Authentication Passed~\n");
 		}
 		else
 		{
-			ReceiveBuf[1]=0xFF;
-			printf("Invalid Password\n");
+			buf[1]=-1;
+			printf("Authentication() Invalid Password !\n");
 		}
 
-		if(send(s,ReceiveBuf,2,0) == SOCKET_ERROR)
+		if(send(s,buf,2,0) == SOCKET_ERROR)
         {
             return 0;
         }
@@ -354,7 +354,7 @@ ULONG DNS(char *HostName)
 	return **(PULONG*)hostent->h_addr_list;
 }
 
-int GetAddressAndPort(char *ReceiveBuf, int DataLen, char *HostName, ULONG *pIp, WORD *RemotePort)  // done!
+int GetAddressAndPort(char *ReceiveBuf, int DataLen, char *HostName, ULONG *pIp, WORD *RemotePort)
 {
 	Socks5Info *Socks5Request=(Socks5Info *)ReceiveBuf;
 	
@@ -438,6 +438,7 @@ BOOL ConnectToRemoteHost(SOCKET *ServerSocket,char *HostName,const WORD RemotePo
     return TRUE;
 }
 
+// Get and return the work mode. 1:TCP CONNECT; 3:UDP ASSOCIATE
 int Get_IP_Port(SOCKET s, char *ReceiveBuf, IP_PORT *IPP)
 {
     int DataLen = recv(s,ReceiveBuf,1024,0);
@@ -446,7 +447,7 @@ int Get_IP_Port(SOCKET s, char *ReceiveBuf, IP_PORT *IPP)
 
     Socks5Info *Socks5Request=(Socks5Info *)ReceiveBuf;
 
-    //Get IP Type //0x01==IP V4地址 0x03代表域名;0x04代表IP V6地址;not Support
+    // ATYP : 0x01==IPv4地址; 0x03==域名; 0x04==IPv6地址 - not Support
     if(Socks5Request->ATYP==1)
     {
         *IPP = *(IP_PORT *)&Socks5Request->IP_LEN;
@@ -470,14 +471,14 @@ int Get_IP_Port(SOCKET s, char *ReceiveBuf, IP_PORT *IPP)
     else
         return 0;
 
-    //Get and return the work mode. 1:TCP CONNECT   3:UDP ASSOCIATE
+    // Get and return the work mode. 1:TCP CONNECT; 3:UDP ASSOCIATE
     if((Socks5Request->CMD == 1)||(Socks5Request->CMD == 3))
         return Socks5Request->CMD;
 
     return 0;
 }
 
-BOOL CreateUDPSocket(_OUT_ Socks5Reply *SAC, _OUT_ SOCKET *p_sock)  // done!
+BOOL CreateUDPSocket(_OUT_ Socks5Reply *SAC, _OUT_ SOCKET *p_sock)
 {
     *p_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if(*p_sock == SOCKET_ERROR)
@@ -500,6 +501,7 @@ BOOL CreateUDPSocket(_OUT_ Socks5Reply *SAC, _OUT_ SOCKET *p_sock)  // done!
     getsockname(*p_sock, (struct sockaddr *)&addr, &AddrLen);
     SAC->IP_PORT.IP   = addr.sin_addr.s_addr;
     SAC->IP_PORT.Port = addr.sin_port;
+    printf("UDP port : %d\n", ntohs(addr.sin_port));
 
     return 1;
 }
@@ -519,12 +521,6 @@ BOOL DoSocks5(SOCKET *CSsocket, char *ReceiveBuf)
 	int CMD = Get_IP_Port(CSsocket[0], ReceiveBuf, &IP_Port);
 	if(!CMD)
 	{
-	/*
-    SAC.Ver=0x05;
-	SAC.REP=0x01;
-	SAC.ATYP=0x01;
-	send(CSsocket[0], (char *)&SAC, 10, 0);
-    */
 		goto exit;
 	}
 	else if(CMD==1) //TCP CONNECT
@@ -571,7 +567,7 @@ exit:
     return 0;
 }
 
-int UDPSend(SOCKET s, char *buf, int nBufSize, struct sockaddr_in *to, int tolen)  // done!
+int UDPSend(SOCKET s, char *buf, int nBufSize, struct sockaddr_in *to, int tolen)
 {
 	int nBytesLeft = nBufSize;
 	int nBytes = 0;
@@ -699,7 +695,7 @@ void TCPTransfer(SOCKET* CSsocket)
 	int read2=0,totalread2=0,send2=0;
 	int sendcount1,sendcount2;
 
-	int maxfd = max(ClientSocket,ServerSocket)+1;
+	int maxfd = (int)(max(ClientSocket, ServerSocket)) + 1;
     int i=0;
 
 	memset(read_in1, 0,MAXBUFSIZE);
@@ -845,7 +841,7 @@ DWORD WINAPI ProxyThread(PVOID sClient)
     memset(buf, 0, sizeof(buf));
 
     int DataLen = recv(CSsocket[0],buf,sizeof(buf),0);
-    if( DataLen == SOCKET_ERROR || DataLen == 0 )
+    if( DataLen < 3 )
         goto exit;
 
     // 判断代理类型，1代表是http代理，4是Socks4，5是Socks5，其他不支持直接return。
@@ -939,11 +935,11 @@ void StartProxy(u_short LisPort)  // done!
 
 int main(int argc, char* argv[])  // done!
 {
-    u_short LisPort = 10086;
+    u_short LisPort = 1080;
 
     printf("SOCKS4 & SOCKS5 & Http Proxy V1.0\n"
            "  usage:\n"
-           "    双击 - 直接启动，默认端口10086\n"
+           "    双击 - 直接启动，默认端口1080\n"
            "    Socks5 [port] [UserName] [PassWord]\n\n"
         );
 
